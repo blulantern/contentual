@@ -78,8 +78,6 @@ src/
   types/          # Shared TypeScript types
 ```
 
-See [`CLAUDE.md`](./CLAUDE.md) for a deeper architectural walkthrough.
-
 ## License
 
 Private / unlicensed.
