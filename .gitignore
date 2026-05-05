@@ -42,3 +42,8 @@ next-env.d.ts
 *.swp
 *.swo
 *~
+
+# Supabase local stack — Docker volumes, generated dumps
+/supabase/.branches
+/supabase/.temp
+/supabase/.env

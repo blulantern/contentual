@@ -1,11 +1,14 @@
 import { create } from 'zustand';
 import {
   CreatorProfile,
+  CreatorSurvey,
   NicheMatch,
   SimilarCreator,
   TopInfluencer,
 } from '@/types/profile';
+import type { PlatformConnection } from '@/types/platforms';
 import { getProfile, saveProfile } from '@/lib/storage/db';
+import { applyCompatibilityScores } from '@/lib/services/niche-compatibility';
 
 interface ProfileState {
   profile: CreatorProfile | null;
@@ -19,6 +22,14 @@ interface ProfileState {
   upsertInfluencerGroup: (group: TopInfluencer) => Promise<void>;
   /** Append several similar creators (de-duped by name + platform). */
   appendSimilarCreators: (creators: SimilarCreator[]) => Promise<void>;
+  /** Replace the connected platforms list. */
+  updatePlatforms: (platforms: PlatformConnection[]) => Promise<void>;
+  /**
+   * Replace the survey and recompute deterministic niche compatibility
+   * scores. AI-derived fields (baselineProfile, similarCreators,
+   * engagementStrategies, topInfluencers) are NOT re-fetched.
+   */
+  updateSurvey: (survey: CreatorSurvey) => Promise<void>;
 }
 
 const persist = async (
@@ -97,6 +108,30 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
     const updated: CreatorProfile = {
       ...profile,
       similarCreators: [...(profile.similarCreators ?? []), ...additions],
+      lastUpdated: new Date(),
+    };
+    await persist(updated, set);
+  },
+
+  updatePlatforms: async (platforms) => {
+    const { profile } = get();
+    if (!profile) return;
+    const updated: CreatorProfile = {
+      ...profile,
+      platforms,
+      lastUpdated: new Date(),
+    };
+    await persist(updated, set);
+  },
+
+  updateSurvey: async (survey) => {
+    const { profile } = get();
+    if (!profile) return;
+    const rescored = applyCompatibilityScores(profile.topNiches, survey);
+    const updated: CreatorProfile = {
+      ...profile,
+      survey,
+      topNiches: rescored,
       lastUpdated: new Date(),
     };
     await persist(updated, set);

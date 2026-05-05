@@ -31,7 +31,6 @@ import {
   Zap,
   ChevronDown,
   ChevronUp,
-  ExternalLink,
   AlertCircle,
 } from 'lucide-react';
 

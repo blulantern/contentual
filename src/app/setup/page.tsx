@@ -5,17 +5,35 @@ import { useRouter } from 'next/navigation';
 import Header from '@/components/layout/Header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+import PlatformConnectionsForm from '@/components/profile-editor/PlatformConnectionsForm';
+import CreatorSurveyForm from '@/components/profile-editor/CreatorSurveyForm';
 import { useConfigStore } from '@/store/config-store';
 import { useProfileStore } from '@/store/profile-store';
 import { AIService } from '@/lib/ai/ai-service';
 import { ProfileService } from '@/lib/services/profile-service';
 import { PlatformConnection } from '@/types/platforms';
 import { CreatorSurvey } from '@/types/profile';
-import { CheckCircle2, Loader2, ArrowRight } from 'lucide-react';
+import { Loader2, ArrowRight } from 'lucide-react';
 
 type SetupStep = 'platforms' | 'survey' | 'generating';
+
+const INITIAL_PLATFORMS: PlatformConnection[] = [
+  { platform: 'tiktok', username: '', connected: false },
+  { platform: 'instagram', username: '', connected: false },
+  { platform: 'youtube', username: '', connected: false },
+  { platform: 'twitter', username: '', connected: false },
+];
+
+const INITIAL_SURVEY: CreatorSurvey = {
+  goals: '',
+  timeCommitment: 10,
+  challenges: [],
+  preferredFormats: [],
+  equipment: [],
+  contentTopics: '',
+  recentPostTitles: [],
+  audience: '',
+};
 
 export default function SetupPage() {
   const router = useRouter();
@@ -24,39 +42,8 @@ export default function SetupPage() {
   const [step, setStep] = useState<SetupStep>('platforms');
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Platform connection state
-  const [platforms, setPlatforms] = useState<PlatformConnection[]>([
-    { platform: 'tiktok', username: '', connected: false },
-    { platform: 'instagram', username: '', connected: false },
-    { platform: 'youtube', username: '', connected: false },
-    { platform: 'twitter', username: '', connected: false },
-  ]);
-
-  // Survey state
-  const [survey, setSurvey] = useState<CreatorSurvey>({
-    goals: '',
-    timeCommitment: 10,
-    challenges: [],
-    preferredFormats: [],
-    equipment: [],
-    contentTopics: '',
-    recentPostTitles: [],
-    audience: '',
-  });
-
-  // Raw input values for comma-separated fields
-  const [challengesInput, setChallengesInput] = useState('');
-  const [formatsInput, setFormatsInput] = useState('');
-  const [equipmentInput, setEquipmentInput] = useState('');
-  const [recentPostsInput, setRecentPostsInput] = useState('');
-
-  const handlePlatformChange = (platform: string, username: string) => {
-    setPlatforms((prev) =>
-      prev.map((p) =>
-        p.platform === platform ? { ...p, username, connected: username.length > 0 } : p
-      )
-    );
-  };
+  const [platforms, setPlatforms] = useState<PlatformConnection[]>(INITIAL_PLATFORMS);
+  const [survey, setSurvey] = useState<CreatorSurvey>(INITIAL_SURVEY);
 
   const handleNextToPlatforms = () => {
     const connectedPlatforms = platforms.filter((p) => p.connected);
@@ -92,18 +79,12 @@ export default function SetupPage() {
       const profileService = new ProfileService(aiService);
 
       const connectedPlatforms = platforms.filter((p) => p.connected);
-
-      // Process comma-separated inputs into arrays
-      const processedSurvey: CreatorSurvey = {
+      const cleanedSurvey: CreatorSurvey = {
         ...survey,
-        challenges: challengesInput.split(',').map((s) => s.trim()).filter(Boolean),
-        preferredFormats: formatsInput.split(',').map((s) => s.trim()).filter(Boolean),
-        equipment: equipmentInput.split(',').map((s) => s.trim()).filter(Boolean),
-        recentPostTitles: recentPostsInput.split(',').map((s) => s.trim()).filter(Boolean),
         audience: survey.audience?.trim() || undefined,
       };
 
-      const profile = await profileService.generateProfile(connectedPlatforms, processedSurvey);
+      const profile = await profileService.generateProfile(connectedPlatforms, cleanedSurvey);
 
       setProfile(profile);
       router.push('/dashboard');
@@ -166,7 +147,6 @@ export default function SetupPage() {
           </div>
         </div>
 
-        {/* Platform Connection Step */}
         {step === 'platforms' && (
           <Card variant="elevated" className="animate-fade-up animation-delay-200">
             <CardHeader>
@@ -176,29 +156,8 @@ export default function SetupPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {platforms.map((platform, idx) => (
-                <div key={platform.platform} className="space-y-3">
-                  <Label className="capitalize text-base">{platform.platform} Username</Label>
-                  <div className="flex gap-3">
-                    <div className="flex-1">
-                      <Input
-                        size="lg"
-                        placeholder={`@your${platform.platform}username`}
-                        value={platform.username}
-                        onChange={(e) => handlePlatformChange(platform.platform, e.target.value)}
-                        className="text-base"
-                      />
-                    </div>
-                    {platform.connected && (
-                      <div className="w-12 h-12 bg-gradient-to-br from-green-400 to-emerald-500 rounded-xl flex items-center justify-center shadow-colored animate-scale-in">
-                        <CheckCircle2 className="w-6 h-6 text-white" />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-
-              <Button onClick={handleNextToPlatforms} className="w-full mt-8 shadow-colored-lg" size="xl">
+              <PlatformConnectionsForm value={platforms} onChange={setPlatforms} />
+              <Button onClick={handleNextToPlatforms} className="w-full mt-4 shadow-colored-lg" size="xl">
                 Continue to Survey
                 <ArrowRight className="ml-2 w-5 h-5" />
               </Button>
@@ -206,7 +165,6 @@ export default function SetupPage() {
           </Card>
         )}
 
-        {/* Survey Step */}
         {step === 'survey' && (
           <Card variant="elevated" className="animate-fade-up animation-delay-200">
             <CardHeader>
@@ -214,102 +172,7 @@ export default function SetupPage() {
               <CardDescription className="text-base">Tell us about your content creation journey</CardDescription>
             </CardHeader>
             <CardContent className="space-y-8">
-              <div className="space-y-3">
-                <Label className="text-base">
-                  What is your content actually about?{' '}
-                  <span className="text-contentual-pink">*</span>
-                </Label>
-                <textarea
-                  className="flex min-h-[100px] w-full rounded-2xl border-2 border-gray-200 bg-white px-5 py-4 text-base transition-all focus:border-contentual-pink focus:ring-4 focus:ring-contentual-pink/20 focus:outline-none resize-none leading-relaxed"
-                  placeholder="e.g., Mom of three sharing parenting hacks, family vlogs, and dating advice for single parents"
-                  value={survey.contentTopics}
-                  onChange={(e) => setSurvey({ ...survey, contentTopics: e.target.value })}
-                />
-                <p className="text-sm text-gray-500">
-                  Be specific — this is the strongest signal we have for matching your niche.
-                </p>
-              </div>
-
-              <div className="space-y-3">
-                <Label className="text-base">3 Recent Post or Video Titles</Label>
-                <Input
-                  size="lg"
-                  placeholder="e.g., Morning routine with toddlers, Date night ideas for busy moms, How I packed lunch in 5 min"
-                  value={recentPostsInput}
-                  onChange={(e) => setRecentPostsInput(e.target.value)}
-                  className="text-base"
-                />
-                <p className="text-sm text-gray-500">Comma-separated. Concrete titles produce better matches than abstract descriptions.</p>
-              </div>
-
-              <div className="space-y-3">
-                <Label className="text-base">Who is your audience? (optional)</Label>
-                <Input
-                  size="lg"
-                  placeholder="e.g., Working moms in their 30s"
-                  value={survey.audience || ''}
-                  onChange={(e) => setSurvey({ ...survey, audience: e.target.value })}
-                  className="text-base"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <Label className="text-base">What are your content creation goals?</Label>
-                <textarea
-                  className="flex min-h-[100px] w-full rounded-2xl border-2 border-gray-200 bg-white px-5 py-4 text-base transition-all focus:border-contentual-pink focus:ring-4 focus:ring-contentual-pink/20 focus:outline-none resize-none leading-relaxed"
-                  placeholder="I want to grow my audience, build a personal brand, share my expertise..."
-                  value={survey.goals}
-                  onChange={(e) => setSurvey({ ...survey, goals: e.target.value })}
-                />
-              </div>
-
-              <div className="space-y-3">
-                <Label className="text-base">Time Commitment (hours per week)</Label>
-                <Input
-                  size="lg"
-                  type="number"
-                  min="1"
-                  max="80"
-                  value={survey.timeCommitment}
-                  onChange={(e) =>
-                    setSurvey({ ...survey, timeCommitment: parseInt(e.target.value) || 0 })
-                  }
-                  className="text-base"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <Label className="text-base">Main Challenges (comma-separated)</Label>
-                <Input
-                  size="lg"
-                  placeholder="e.g., Finding ideas, Editing, Consistency, Growing audience"
-                  value={challengesInput}
-                  onChange={(e) => setChallengesInput(e.target.value)}
-                  className="text-base"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <Label className="text-base">Preferred Content Formats (comma-separated)</Label>
-                <Input
-                  size="lg"
-                  placeholder="e.g., Short videos, Long-form, Stories, Reels, Blogs"
-                  value={formatsInput}
-                  onChange={(e) => setFormatsInput(e.target.value)}
-                  className="text-base"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <Label className="text-base">Equipment You Have (comma-separated)</Label>
-                <Input
-                  size="lg"
-                  placeholder="e.g., Smartphone, Camera, Microphone, Lighting, Editing software"
-                  value={equipmentInput}
-                  onChange={(e) => setEquipmentInput(e.target.value)}
-                  className="text-base"
-                />
-              </div>
+              <CreatorSurveyForm value={survey} onChange={setSurvey} />
 
               <div className="flex flex-col sm:flex-row gap-4 pt-4">
                 <Button onClick={() => setStep('platforms')} variant="secondary" size="xl" className="flex-1">
@@ -333,7 +196,6 @@ export default function SetupPage() {
           </Card>
         )}
 
-        {/* Generating Step */}
         {step === 'generating' && (
           <Card variant="elevated" className="animate-fade-up animation-delay-200">
             <CardContent className="py-20 text-center">

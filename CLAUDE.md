@@ -18,6 +18,7 @@ There is one known pre-existing TS error in `src/lib/ai/context-api.ts:49` (a `T
 
 - `NEXT_PUBLIC_ANTHROPIC_API_KEY` — optional. The key is also configurable in-app via `/settings`, which persists to `localStorage` (`contentual_ai_config`). See `.env.local.example`.
 - `NEXT_PUBLIC_AI_FIXTURE_MODE` — `off` (default), `record`, or `replay`. See "Fixture mode" below.
+- `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` — **required**. The app's persistence is Supabase Postgres. Run `supabase/schema.sql` in the project's SQL editor on first setup.
 - The Anthropic SDK is called from the browser using `dangerouslyAllowBrowser: true` (see `src/lib/ai/console-api.ts`, `src/lib/ai/context-api.ts`). This is a known development-mode shortcut; if you add production hardening, route calls through Next.js API routes instead.
 
 ### Fixture mode
@@ -71,16 +72,26 @@ Next.js 14 App Router app. **There is no backend** — every page is a client co
 
    **Every AI-backed service demands JSON-only responses but still runs `content.match(/\{[\s\S]*\}/)` before `JSON.parse`** to tolerate occasional preamble. Preserve this pattern when adding new ones.
 
-3. **Persistence** (`src/lib/storage/db.ts`) — IndexedDB via Dexie. Current schema is **v3**:
-   - `profile` — single creator profile.
-   - `weeklyPlans` — generated weekly plans.
-   - `trendDictionary` — persistent trend dictionary, compound PK `[nicheId+normalizedKey]`. **Trends accumulate forever** (with a soft cap of 500/niche, LRU evicted by `lastSeenAt`). Indexes: `nicheId`, `lastSeenAt`, `[nicheId+trendingScore]`.
-   - `nicheTrendMeta` — `{nicheId, lastFetchedAt, viewCursor, pageSize}`. Tracks the 3h fetch rate-limit and cycle cursor per niche.
-   - `contentIdeasCache` — `{cacheKey, nicheIds, platforms, ideas, trendTitlesUsed, generatedAt, expiresAt}`. 24h TTL.
+3. **Persistence** is two-layer:
+   - **Source of truth: Supabase Postgres** (`src/lib/storage/supabase.ts` + `supabase/schema.sql`). Survives across browsers and devices. Run the schema SQL once in the Supabase SQL editor on a fresh project. Tables:
+     - `profile` — single row at a time; full `CreatorProfile` in a `data` jsonb column.
+     - `weekly_plans` — id + type + week_start/week_end columns + `data` jsonb.
+     - `trend_dictionary` — relational columns mirroring `TrendItem`. Compound PK `(niche_id, normalized_key)`. Indexes on `niche_id`, `last_seen_at`, `(niche_id, trending_score)`. **Trends accumulate forever** (soft cap 500/niche, LRU evicted by `last_seen_at`).
+     - `niche_trend_meta` — `(niche_id, last_fetched_at, view_cursor, page_size)`.
+     - `content_ideas_cache` — `(cache_key, niche_ids, platforms, ideas, trend_titles_used, generated_at, expires_at)`. 24h TTL.
+   - **Speed cache: IndexedDB / Dexie** (`src/lib/storage/local-cache.ts`). Per-browser cache mirroring the Supabase tables in their camelCase TS shape. Best-effort: every Dexie op is wrapped in `tryCache()` which swallows failures (SSR, Safari private mode, quota errors). The cache is a speed-up, not a correctness requirement — never depend on it.
 
-   v2 → v3 upgrade migrates `trendCache` rows into `trendDictionary` via the runtime merge path (`src/lib/storage/db.ts:upgrade`). Old `trends` / `contentIdeas` / `trendCache` tables are dropped on upgrade.
+   **Read pattern** — every helper in `db.ts` tries the local cache first; on miss, hits Supabase, populates the cache, and returns. **Write pattern** — Supabase first (durable), then mirror to the cache.
 
-   **When bumping schema:** add a new `version(N).stores(...)` block; never mutate prior versions. The migration callback can read tables defined in the previous schema before they're dropped.
+   **Single-user / no auth.** RLS is enabled; the `anon` role has full access via permissive policies. Anyone with the deployed URL has full read/write — fine for personal use, NOT safe to deploy publicly without auth.
+
+   `db.ts` exports the call-site API: `saveProfile`, `getProfile`, `saveWeeklyPlan`, `getCurrentWeeklyPlan`, `getTrendByKey`, `putTrend`, `getTrendsForNiche`, `countTrendsForNiche`, `enforceTrendSoftCap`, `getNicheTrendMeta`, `putNicheTrendMeta`, `getContentIdeasCache`, `putContentIdeasCache`, `clearExpiredContentIdeasCaches`. Snake_case columns are mapped to camelCase types at the Supabase boundary; `timestamptz` columns come back as ISO strings and are revived to `Date` via `toDate()`.
+
+   **When changing schema:** update `supabase/schema.sql` (it's idempotent — `create table if not exists`, `drop policy if exists`). If a Postgres column is added that the cache should mirror, bump the Dexie version in `local-cache.ts` and add a `version(N).stores(...)` block (don't mutate prior versions). Schema drift between Supabase and Dexie is OK for a release window — the cache is best-effort.
+
+   **Atomicity caveat:** the trend merge path doesn't run in a Postgres transaction (Supabase JS doesn't expose one without an RPC function). The per-niche `withNicheLock` in `trend-cache-service.ts` serializes concurrent calls within a session, so the only remaining race is power-loss mid-merge. Acceptable for single-user; promote to a Postgres function (`merge_trend(...)`) called via `supabase.rpc()` if multi-user lands.
+
+   **Stale-cache caveat:** if a write happens on device A, device B's cache won't see it until B's reads miss something the cache claims to have. For trends, `getTrendsForNiche` will miss only when the cache has zero rows for that niche — so cross-device additions to an already-populated niche won't be visible until the next write-through clears or augments the cached set. Single-user / single-device usage avoids this entirely.
 
 4. **State** (`src/store/`) — Zustand.
    - `profile-store` — mirrors the persisted profile. Actions: `setProfile`, `loadProfile`, `updateNiches`, `setSimilarCreators`, `upsertInfluencerGroup`, `appendSimilarCreators`. Each persists via `saveProfile` and bumps `lastUpdated`.

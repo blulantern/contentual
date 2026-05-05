@@ -7,18 +7,86 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { useConfigStore } from '@/store/config-store';
-import { CheckCircle2, XCircle, Loader2, Trash2 } from 'lucide-react';
+import { useProfileStore } from '@/store/profile-store';
+import {
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Trash2,
+  Database,
+  Sparkles,
+  AlertCircle,
+} from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { AIService } from '@/lib/ai/ai-service';
+import {
+  SeedingService,
+  type FixtureInventory,
+  type SeedResult,
+} from '@/lib/services/seeding-service';
 
 export default function SettingsPage() {
+  const router = useRouter();
   const { config, updateConfig, testConnection, resetConfig, isTesting, testResult } =
     useConfigStore();
+  const { loadProfile } = useProfileStore();
   const [apiKey, setApiKey] = useState('');
   const [saveMessage, setSaveMessage] = useState('');
+
+  // Fixture seeding state
+  const [inventory, setInventory] = useState<FixtureInventory | null>(null);
+  const [seedingState, setSeedingState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [seedResult, setSeedResult] = useState<SeedResult | null>(null);
+  const [seedError, setSeedError] = useState<string | null>(null);
 
   useEffect(() => {
     setApiKey(config.apiKey);
   }, [config.apiKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const svc = new SeedingService(new AIService(config));
+        const inv = await svc.inventory();
+        if (!cancelled) setInventory(inv);
+      } catch (err) {
+        console.warn('[settings] inventory failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // re-inventory when AI config changes (rare, but harmless)
+  }, [config]);
+
+  const handleSeed = async () => {
+    if (!inventory || inventory.profileGen === 0) return;
+    if (
+      !confirm(
+        'This will overwrite your current profile and append fixture trends to your dictionary. Continue?'
+      )
+    ) {
+      return;
+    }
+    setSeedingState('running');
+    setSeedError(null);
+    try {
+      const svc = new SeedingService(new AIService(config));
+      const result = await svc.seed();
+      setSeedResult(result);
+      setSeedingState('done');
+      // Pull the freshly-seeded profile into the Zustand store so any other
+      // tab/component picks it up without a hard reload.
+      await loadProfile();
+    } catch (err) {
+      setSeedError((err as Error).message);
+      setSeedingState('error');
+    }
+  };
+
+  const goToDashboard = () => router.push('/dashboard');
 
   const handleSave = () => {
     if (!apiKey || !apiKey.startsWith('sk-ant-')) {
@@ -322,8 +390,154 @@ export default function SettingsPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Seed from local fixtures */}
+          <Card variant="elevated" className="animate-fade-up animation-delay-[600ms]">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-3 text-2xl sm:text-3xl">
+                <div className="w-12 h-12 bg-gradient-secondary rounded-2xl flex items-center justify-center shadow-colored">
+                  <Database className="w-6 h-6 text-white" />
+                </div>
+                Seed from local fixtures
+              </CardTitle>
+              <CardDescription className="text-base">
+                Skip the setup survey. Pulls profile, trends, and content ideas from
+                recorded AI fixtures and writes them through to Supabase + the local
+                cache.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid sm:grid-cols-4 gap-3">
+                <FixtureCount label="Profile" value={inventory?.profileGen ?? 0} />
+                <FixtureCount
+                  label="Niche creators"
+                  value={inventory?.nicheCreators ?? 0}
+                />
+                <FixtureCount label="Trends" value={inventory?.trendAnalysis ?? 0} />
+                <FixtureCount label="Ideas" value={inventory?.contentIdeas ?? 0} />
+              </div>
+
+              {inventory && inventory.profileGen === 0 && (
+                <div className="p-4 rounded-xl border-2 border-yellow-200 bg-yellow-50 flex items-start gap-3 text-sm text-yellow-800">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                  <p>
+                    No profile-generation fixture found. Record one first:
+                    set <code className="font-mono">NEXT_PUBLIC_AI_FIXTURE_MODE=record</code>
+                    , run setup once, then come back here.
+                  </p>
+                </div>
+              )}
+
+              {seedResult && seedingState === 'done' && (
+                <div className="p-4 rounded-xl border-2 border-green-200 bg-green-50 space-y-2 text-sm text-green-800">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <CheckCircle2 className="w-5 h-5" />
+                    Seed complete.
+                  </div>
+                  <ul className="ml-7 list-disc space-y-0.5 text-green-900/90">
+                    <li>
+                      Profile imported:{' '}
+                      <span className="font-semibold">
+                        {seedResult.profileImported ? 'yes' : 'no'}
+                      </span>
+                    </li>
+                    <li>
+                      Niche-creator groups merged:{' '}
+                      <span className="font-semibold">
+                        {seedResult.nicheCreatorGroupsImported}
+                      </span>
+                    </li>
+                    <li>
+                      Trends merged:{' '}
+                      <span className="font-semibold">
+                        {Object.values(seedResult.trendsImportedByNiche).reduce(
+                          (a, b) => a + b,
+                          0
+                        )}
+                      </span>{' '}
+                      across {Object.keys(seedResult.trendsImportedByNiche).length}{' '}
+                      niches
+                    </li>
+                    <li>
+                      Content-ideas cache rows written:{' '}
+                      <span className="font-semibold">
+                        {seedResult.ideasCacheRowsWritten}
+                      </span>
+                    </li>
+                  </ul>
+                  {seedResult.warnings.length > 0 && (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer font-semibold text-yellow-700">
+                        {seedResult.warnings.length} warning(s)
+                      </summary>
+                      <ul className="ml-4 mt-1 list-disc text-xs text-yellow-700">
+                        {seedResult.warnings.map((w, i) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              )}
+
+              {seedingState === 'error' && seedError && (
+                <div className="p-4 rounded-xl border-2 border-red-200 bg-red-50 flex items-start gap-3 text-sm text-red-700">
+                  <XCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                  <p>
+                    <span className="font-semibold">Seed failed:</span> {seedError}
+                  </p>
+                </div>
+              )}
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <Button
+                  onClick={handleSeed}
+                  disabled={
+                    !inventory ||
+                    inventory.profileGen === 0 ||
+                    seedingState === 'running'
+                  }
+                  size="xl"
+                  className="shadow-colored-lg"
+                >
+                  {seedingState === 'running' ? (
+                    <>
+                      <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                      Seeding…
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="mr-2 h-5 w-5" />
+                      Seed from fixtures
+                    </>
+                  )}
+                </Button>
+                {seedingState === 'done' && (
+                  <Button
+                    onClick={goToDashboard}
+                    variant="secondary"
+                    size="xl"
+                    className="sm:ml-auto"
+                  >
+                    Open dashboard →
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </main>
+    </div>
+  );
+}
+
+function FixtureCount({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="p-4 rounded-xl border-2 border-gray-100 bg-white">
+      <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1">
+        {label}
+      </p>
+      <p className="text-2xl font-bold text-gray-900">{value}</p>
     </div>
   );
 }

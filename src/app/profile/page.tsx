@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import Header from '@/components/layout/Header';
 import NichePicker from '@/components/niche-picker/NichePicker';
 import PlatformLink from '@/components/platform-link/PlatformLink';
+import PlatformsEditModal from '@/components/profile-editor/PlatformsEditModal';
+import SurveyEditModal from '@/components/profile-editor/SurveyEditModal';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,12 +15,35 @@ import { useConfigStore } from '@/store/config-store';
 import { AIService } from '@/lib/ai/ai-service';
 import { CreatorsService } from '@/lib/services/creators-service';
 import { applyCompatibilityScores } from '@/lib/services/niche-compatibility';
-import { Users, Target, TrendingUp, ExternalLink, Pencil, Loader2 } from 'lucide-react';
-import { getPlatformUrl } from '@/lib/data/platforms';
-import type { Influencer, NicheMatch, SimilarCreator } from '@/types/profile';
+import { Users, Target, TrendingUp, ExternalLink, Pencil, Loader2, Link2, ClipboardList } from 'lucide-react';
+import { getPlatformUrl, SUPPORTED_PLATFORMS } from '@/lib/data/platforms';
+import type {
+  CreatorSurvey,
+  Influencer,
+  NicheMatch,
+  SimilarCreator,
+} from '@/types/profile';
+import type { PlatformConnection } from '@/types/platforms';
 
 const truncate = (s: string, n: number): string =>
   s.length > n ? `${s.slice(0, n).trimEnd()}…` : s;
+
+function SurveyField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1.5">
+        {label}
+      </p>
+      {children}
+    </div>
+  );
+}
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -29,9 +54,13 @@ export default function ProfilePage() {
     setSimilarCreators,
     upsertInfluencerGroup,
     appendSimilarCreators,
+    updatePlatforms,
+    updateSurvey,
   } = useProfileStore();
   const { config } = useConfigStore();
   const [nichePickerOpen, setNichePickerOpen] = useState(false);
+  const [platformsModalOpen, setPlatformsModalOpen] = useState(false);
+  const [surveyModalOpen, setSurveyModalOpen] = useState(false);
   const [loadingNiches, setLoadingNiches] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -351,6 +380,172 @@ export default function ProfilePage() {
           currentNiches={profile.topNiches}
           onClose={() => setNichePickerOpen(false)}
           onSave={handleNichesSave}
+        />
+
+        {/* Connected Platforms */}
+        <Card variant="elevated" className="mb-8 animate-fade-up animation-delay-[700ms]">
+          <CardHeader>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-3 text-2xl">
+                  <div className="w-10 h-10 bg-gradient-secondary rounded-2xl flex items-center justify-center shadow-colored">
+                    <Link2 className="w-5 h-5 text-white" />
+                  </div>
+                  Connected Platforms
+                </CardTitle>
+                <CardDescription className="mt-1">
+                  Add, edit, or disconnect your social handles.
+                </CardDescription>
+              </div>
+              <Button variant="secondary" size="sm" onClick={() => setPlatformsModalOpen(true)}>
+                <Pencil className="w-4 h-4 mr-1.5" />
+                Edit platforms
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              {SUPPORTED_PLATFORMS.map((p) => {
+                const conn = profile.platforms.find((x) => x.platform === p);
+                if (conn && conn.username) {
+                  return (
+                    <PlatformLink
+                      key={p}
+                      platform={p}
+                      href={getPlatformUrl(p, conn.username.replace(/^@/, ''))}
+                      variant="chip"
+                      title={`Open @${conn.username.replace(/^@/, '')} on ${p}`}
+                    >
+                      @{conn.username.replace(/^@/, '')}
+                    </PlatformLink>
+                  );
+                }
+                return (
+                  <span
+                    key={p}
+                    className="inline-flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-lg text-sm bg-gray-50 border border-gray-200 text-gray-400 capitalize"
+                  >
+                    <span className="w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center text-gray-400 bg-gray-200">
+                      —
+                    </span>
+                    {p} · not connected
+                  </span>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Your Survey */}
+        <Card variant="elevated" className="mb-8 animate-fade-up animation-delay-[750ms]">
+          <CardHeader>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-3 text-2xl">
+                  <div className="w-10 h-10 bg-gradient-to-br from-contentual-peach to-contentual-pink rounded-2xl flex items-center justify-center shadow-colored">
+                    <ClipboardList className="w-5 h-5 text-white" />
+                  </div>
+                  Your Survey
+                </CardTitle>
+                <CardDescription className="mt-1">
+                  Source signal for your niche matches. Updating these refreshes match scores.
+                </CardDescription>
+              </div>
+              <Button variant="secondary" size="sm" onClick={() => setSurveyModalOpen(true)}>
+                <Pencil className="w-4 h-4 mr-1.5" />
+                Edit survey
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <SurveyField label="Content topics">
+              <p className="text-gray-800 leading-snug">
+                {profile.survey.contentTopics
+                  ? truncate(profile.survey.contentTopics, 280)
+                  : <span className="text-gray-400 italic">Not set</span>}
+              </p>
+            </SurveyField>
+
+            {profile.survey.recentPostTitles.length > 0 && (
+              <SurveyField label="Recent posts">
+                <ul className="space-y-1.5 text-sm text-gray-800">
+                  {profile.survey.recentPostTitles.map((t, i) => (
+                    <li key={i} className="flex gap-2 leading-snug">
+                      <span className="text-contentual-pink font-bold flex-shrink-0">·</span>
+                      <span>{t}</span>
+                    </li>
+                  ))}
+                </ul>
+              </SurveyField>
+            )}
+
+            <div className="grid sm:grid-cols-2 gap-5">
+              {profile.survey.audience && (
+                <SurveyField label="Audience">
+                  <p className="text-gray-800 text-sm">{profile.survey.audience}</p>
+                </SurveyField>
+              )}
+              <SurveyField label="Time commitment">
+                <p className="text-gray-800 text-sm">{profile.survey.timeCommitment} hours / week</p>
+              </SurveyField>
+            </div>
+
+            {profile.survey.challenges.length > 0 && (
+              <SurveyField label="Challenges">
+                <div className="flex flex-wrap gap-1.5">
+                  {profile.survey.challenges.map((c, i) => (
+                    <Badge key={i} variant="secondary" size="sm">{c}</Badge>
+                  ))}
+                </div>
+              </SurveyField>
+            )}
+
+            {profile.survey.preferredFormats.length > 0 && (
+              <SurveyField label="Preferred formats">
+                <div className="flex flex-wrap gap-1.5">
+                  {profile.survey.preferredFormats.map((f, i) => (
+                    <Badge key={i} variant="secondary" size="sm">{f}</Badge>
+                  ))}
+                </div>
+              </SurveyField>
+            )}
+
+            {profile.survey.equipment.length > 0 && (
+              <SurveyField label="Equipment">
+                <div className="flex flex-wrap gap-1.5">
+                  {profile.survey.equipment.map((e, i) => (
+                    <Badge key={i} variant="secondary" size="sm">{e}</Badge>
+                  ))}
+                </div>
+              </SurveyField>
+            )}
+
+            {profile.survey.goals && (
+              <SurveyField label="Goals">
+                <p className="text-sm text-gray-700 leading-snug">
+                  {truncate(profile.survey.goals, 240)}
+                </p>
+              </SurveyField>
+            )}
+          </CardContent>
+        </Card>
+
+        <PlatformsEditModal
+          open={platformsModalOpen}
+          currentPlatforms={profile.platforms}
+          onClose={() => setPlatformsModalOpen(false)}
+          onSave={async (next: PlatformConnection[]) => {
+            await updatePlatforms(next);
+          }}
+        />
+
+        <SurveyEditModal
+          open={surveyModalOpen}
+          currentSurvey={profile.survey}
+          onClose={() => setSurveyModalOpen(false)}
+          onSave={async (next: CreatorSurvey) => {
+            await updateSurvey(next);
+          }}
         />
 
         {/* Engagement Strategies — compact */}

@@ -8,11 +8,13 @@ import {
 import { SocialPlatform } from '@/types/platforms';
 import { analyzeTrendsPrompt, SYSTEM_PROMPTS } from '../ai/prompts';
 import {
-  db,
   getNicheTrendMeta,
   putNicheTrendMeta,
   countTrendsForNiche,
   enforceTrendSoftCap,
+  getTrendByKey,
+  putTrend,
+  getTrendsForNiche,
 } from '../storage/db';
 import {
   NICHE_CATEGORIES,
@@ -85,10 +87,7 @@ export class TrendDictionaryService {
   async getView(nicheIds: number[]): Promise<TrendItem[]> {
     const collected: TrendItem[] = [];
     for (const nicheId of nicheIds) {
-      const rows = await db.trendDictionary
-        .where('nicheId')
-        .equals(nicheId)
-        .toArray();
+      const rows = await getTrendsForNiche(nicheId);
       if (rows.length === 0) continue;
       rows.sort(byLastSeenThenScore);
       const meta = await getNicheTrendMeta(nicheId);
@@ -199,50 +198,7 @@ export class TrendDictionaryService {
           throw new Error(`Unknown niche id: ${nicheId}`);
         }
         const fetched = await this.fetchTrendsForNiche(niche.name, platforms);
-
-        await db.transaction('rw', db.trendDictionary, db.nicheTrendMeta, async () => {
-          for (const trend of fetched) {
-            const key = normalizeTrendTitle(trend.title);
-            if (!key) continue;
-            const existing = await db.trendDictionary.get([nicheId, key]);
-            if (existing) {
-              const normalizedExisting = normalizeTrendForView(existing);
-              await db.trendDictionary.put({
-                ...existing,
-                lastSeenAt: now,
-                trendingScore: Math.max(existing.trendingScore, trend.trendingScore),
-                hashtags: mergeHashtags(normalizedExisting.hashtags, trend.hashtags),
-                exampleLinks: mergeCreators(
-                  normalizedExisting.exampleLinks,
-                  trend.exampleLinks
-                ),
-                description:
-                  trend.description.length > existing.description.length
-                    ? trend.description
-                    : existing.description,
-                audioTrack: existing.audioTrack || trend.audioTrack,
-                platforms: dedupe([...existing.platforms, ...trend.platforms]) as TrendItem['platforms'],
-              });
-            } else {
-              await db.trendDictionary.put({
-                ...trend,
-                nicheId,
-                niche,
-                normalizedKey: key,
-                firstSeenAt: now,
-                lastSeenAt: now,
-              });
-            }
-          }
-          await db.nicheTrendMeta.put({
-            ...meta,
-            lastFetchedAt: now,
-            viewCursor: 0,
-          });
-        });
-
-        await enforceTrendSoftCap(nicheId);
-
+        await this._mergeAndPersist(nicheId, niche, fetched, meta, now);
         return {
           nicheId,
           source: 'fresh' as const,
@@ -280,47 +236,140 @@ export class TrendDictionaryService {
       systemPrompt: SYSTEM_PROMPTS.trendAnalysis,
       maxTokens: 8192,
     });
+    return parseTrendsContent(response.content, nicheName, platforms);
+  }
 
-    let jsonContent = response.content.trim();
-    const jsonMatch = jsonContent.match(/\{[\s\S]*\}/);
-    if (jsonMatch) jsonContent = jsonMatch[0];
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(jsonContent);
-    } catch {
-      console.error('Failed to parse trends JSON:', jsonContent);
-      throw new Error('AI returned invalid JSON format. Please try again.');
+  /**
+   * Sequential dedupe-merge of a fetched batch into the dictionary, plus a
+   * niche-meta upsert. Extracted from regenerate so fixture seeding can
+   * reuse the same merge pipeline without a fresh AI call.
+   */
+  private async _mergeAndPersist(
+    nicheId: number,
+    niche: import('@/types/profile').NicheCategory,
+    fetched: TrendItem[],
+    meta: NicheTrendMeta,
+    now: Date
+  ): Promise<void> {
+    for (const trend of fetched) {
+      const key = normalizeTrendTitle(trend.title);
+      if (!key) continue;
+      const existing = await getTrendByKey(nicheId, key);
+      if (existing) {
+        const normalizedExisting = normalizeTrendForView(existing);
+        await putTrend({
+          ...existing,
+          lastSeenAt: now,
+          trendingScore: Math.max(existing.trendingScore, trend.trendingScore),
+          hashtags: mergeHashtags(normalizedExisting.hashtags, trend.hashtags),
+          exampleLinks: mergeCreators(
+            normalizedExisting.exampleLinks,
+            trend.exampleLinks
+          ),
+          description:
+            trend.description.length > existing.description.length
+              ? trend.description
+              : existing.description,
+          audioTrack: existing.audioTrack || trend.audioTrack,
+          platforms: dedupe([...existing.platforms, ...trend.platforms]) as TrendItem['platforms'],
+        });
+      } else {
+        await putTrend({
+          ...trend,
+          nicheId,
+          niche,
+          normalizedKey: key,
+          firstSeenAt: now,
+          lastSeenAt: now,
+        });
+      }
     }
+    await putNicheTrendMeta({
+      ...meta,
+      lastFetchedAt: now,
+      viewCursor: 0,
+    });
+    await enforceTrendSoftCap(nicheId);
+  }
 
+  /**
+   * Seed-from-fixture entry point: feed in a raw trend-analysis response
+   * (already in JSON-or-fenced form) and the niche it was generated for,
+   * and merge it into the dictionary as if a fresh fetch had returned it.
+   * Bypasses both the AI call and the 3h rate limit.
+   */
+  async seedFromRawTrendsResponse(
+    nicheName: string,
+    platforms: SocialPlatform[],
+    rawContent: string
+  ): Promise<{ nicheId: number; merged: number }> {
     const niche = NICHE_CATEGORIES.find((n) => n.name === nicheName);
+    if (!niche) throw new Error(`Unknown niche name: ${nicheName}`);
+    const items = parseTrendsContent(rawContent, nicheName, platforms);
     const now = new Date();
-
-    return (parsed.trends || []).map((trend: any): TrendItem => {
-      const trendPlatforms: SocialPlatform[] = sanitizePlatforms(trend.platforms, []);
-      const fallbackPlatforms = trendPlatforms.length > 0 ? trendPlatforms : platforms;
-      return {
-        id: crypto.randomUUID(),
-        normalizedKey: '', // re-derived on merge
-        nicheId: niche?.id ?? 0,
-        niche: niche || NICHE_CATEGORIES[0],
-        title: String(trend.title ?? ''),
-        description: String(trend.description ?? ''),
-        platforms: trendPlatforms.length > 0 ? trendPlatforms : platforms,
-        trendingScore: Number(trend.trendingScore) || 0,
-        hashtags: (Array.isArray(trend.hashtags) ? trend.hashtags : [])
-          .map((h: any) => coerceHashtag(h, fallbackPlatforms))
-          .filter((h: HashtagRef | null): h is HashtagRef => h !== null),
-        audioTrack: trend.audioTrack || undefined,
-        exampleLinks: (Array.isArray(trend.exampleCreators) ? trend.exampleCreators : [])
-          .map((c: any) => coerceCreatorRef(c, fallbackPlatforms))
-          .filter((c: ExternalCreatorRef | null): c is ExternalCreatorRef => c !== null),
-        firstSeenAt: now,
-        lastSeenAt: now,
-      };
+    return withNicheLock(niche.id, async () => {
+      const meta: NicheTrendMeta =
+        (await getNicheTrendMeta(niche.id)) ?? {
+          nicheId: niche.id,
+          lastFetchedAt: new Date(0),
+          viewCursor: 0,
+          pageSize: DEFAULT_PAGE_SIZE,
+        };
+      await this._mergeAndPersist(niche.id, niche, items, meta, now);
+      return { nicheId: niche.id, merged: items.length };
     });
   }
 }
+
+/**
+ * Parse a raw trends-API JSON-or-fenced-JSON response into TrendItem[].
+ * Tolerates the legacy bare-string hashtag/creator shape via the same
+ * coerce helpers the AI fetch path uses.
+ */
+export const parseTrendsContent = (
+  rawContent: string,
+  nicheName: string,
+  fallbackPlatformsArg: SocialPlatform[]
+): TrendItem[] => {
+  let jsonContent = rawContent.trim();
+  const jsonMatch = jsonContent.match(/\{[\s\S]*\}/);
+  if (jsonMatch) jsonContent = jsonMatch[0];
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonContent);
+  } catch {
+    console.error('Failed to parse trends JSON:', jsonContent);
+    throw new Error('Trends response is not valid JSON.');
+  }
+
+  const niche = NICHE_CATEGORIES.find((n) => n.name === nicheName);
+  const now = new Date();
+
+  return (parsed.trends || []).map((trend: any): TrendItem => {
+    const trendPlatforms: SocialPlatform[] = sanitizePlatforms(trend.platforms, []);
+    const fallback = trendPlatforms.length > 0 ? trendPlatforms : fallbackPlatformsArg;
+    return {
+      id: crypto.randomUUID(),
+      normalizedKey: '',
+      nicheId: niche?.id ?? 0,
+      niche: niche || NICHE_CATEGORIES[0],
+      title: String(trend.title ?? ''),
+      description: String(trend.description ?? ''),
+      platforms: trendPlatforms.length > 0 ? trendPlatforms : fallbackPlatformsArg,
+      trendingScore: Number(trend.trendingScore) || 0,
+      hashtags: (Array.isArray(trend.hashtags) ? trend.hashtags : [])
+        .map((h: any) => coerceHashtag(h, fallback))
+        .filter((h: HashtagRef | null): h is HashtagRef => h !== null),
+      audioTrack: trend.audioTrack || undefined,
+      exampleLinks: (Array.isArray(trend.exampleCreators) ? trend.exampleCreators : [])
+        .map((c: any) => coerceCreatorRef(c, fallback))
+        .filter((c: ExternalCreatorRef | null): c is ExternalCreatorRef => c !== null),
+      firstSeenAt: now,
+      lastSeenAt: now,
+    };
+  });
+};
 
 const byLastSeenThenScore = (a: TrendItem, b: TrendItem): number => {
   const t = b.lastSeenAt.getTime() - a.lastSeenAt.getTime();

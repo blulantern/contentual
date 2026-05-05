@@ -1,173 +1,440 @@
-import Dexie, { Table } from 'dexie';
+/**
+ * Persistence facade.
+ *
+ * Layers, top to bottom:
+ *  1. **Local cache** (IndexedDB / Dexie, see local-cache.ts) — fast reads,
+ *     per-browser. Best-effort: failures are swallowed, never propagated.
+ *  2. **Supabase Postgres** (see supabase.ts + supabase/schema.sql) — the
+ *     source of truth. Survives across browsers and devices. Single-user
+ *     app: anon role has full RLS access (do NOT deploy publicly).
+ *
+ * Read pattern: try cache → on miss, hit Supabase, populate cache, return.
+ * Write pattern: write to Supabase first (durable), then mirror to cache.
+ *
+ * Callers should not need to know about either layer — the exported helpers
+ * preserve the same signatures the rest of the app already uses.
+ *
+ * Boundary rules:
+ *  - Postgres uses snake_case columns; the TS API uses camelCase. Do the
+ *    mapping at the Supabase boundary.
+ *  - `timestamptz` columns come back as ISO strings. Revive to `Date` here.
+ *  - JSONB carries arbitrary objects (Profile, WeeklyPlan, etc.) and any
+ *    nested Date fields will round-trip as strings. Revive explicitly.
+ */
+
 import { CreatorProfile } from '@/types/profile';
 import { WeeklyPlan } from '@/types/plans';
-import {
-  TrendItem,
-  NicheTrendMeta,
-  ContentIdeasCacheRow,
-} from '@/types/trends';
-import { normalizeTrendTitle } from '../services/trend-normalize';
+import { TrendItem, NicheTrendMeta, ContentIdeasCacheRow } from '@/types/trends';
+import { getSupabase } from './supabase';
+import { tryCache } from './local-cache';
 
 const SOFT_CAP_PER_NICHE = 500;
 
-export class ContentualDatabase extends Dexie {
-  profile!: Table<CreatorProfile, string>;
-  weeklyPlans!: Table<WeeklyPlan, string>;
-  trendDictionary!: Table<TrendItem, [number, string]>;
-  nicheTrendMeta!: Table<NicheTrendMeta, number>;
-  contentIdeasCache!: Table<ContentIdeasCacheRow, string>;
+const sb = () => getSupabase();
 
-  constructor() {
-    super('ContentualDB');
+// ─── helpers: date revival ──────────────────────────────────────────────────
 
-    this.version(1).stores({
-      profile: 'id, generatedAt, lastUpdated',
-      weeklyPlans: 'id, weekStart, weekEnd, type',
-      trends: 'id, dateAdded, trendingScore',
-      contentIdeas: 'id, difficulty',
-    });
+const toDate = (v: unknown): Date => {
+  if (v instanceof Date) return v;
+  return new Date(v as string);
+};
 
-    this.version(2).stores({
-      profile: 'id, generatedAt, lastUpdated',
-      weeklyPlans: 'id, weekStart, weekEnd, type',
-      trends: 'id, dateAdded, trendingScore',
-      contentIdeas: 'id, difficulty',
-      trendCache: 'id, nicheName, cachedAt, expiresAt',
-    });
+const reviveProfile = (raw: any): CreatorProfile => ({
+  ...raw,
+  generatedAt: toDate(raw.generatedAt),
+  lastUpdated: toDate(raw.lastUpdated),
+});
 
-    // v3 — persistent trend dictionary keyed by [nicheId+normalizedKey].
-    // Drops `trends`, `contentIdeas`, `trendCache`. Migrates trendCache rows
-    // into trendDictionary via the same normalize+merge path the runtime uses.
-    this.version(3)
-      .stores({
-        profile: 'id, generatedAt, lastUpdated',
-        weeklyPlans: 'id, weekStart, weekEnd, type',
-        trendDictionary:
-          '[nicheId+normalizedKey], nicheId, lastSeenAt, [nicheId+trendingScore]',
-        nicheTrendMeta: 'nicheId',
-        contentIdeasCache: 'cacheKey, expiresAt',
-      })
-      .upgrade(async (tx) => {
-        let oldCaches: any[] = [];
-        try {
-          oldCaches = await tx.table('trendCache').toArray();
-        } catch {
-          // table didn't exist (fresh install or already-upgraded) — nothing to do
-          return;
-        }
-
-        for (const cache of oldCaches) {
-          const cachedAt =
-            cache.cachedAt instanceof Date ? cache.cachedAt : new Date(cache.cachedAt);
-          const nicheIdRaw = cache.id;
-          const nicheId =
-            typeof nicheIdRaw === 'number' ? nicheIdRaw : parseInt(nicheIdRaw, 10);
-          if (!Number.isFinite(nicheId)) continue;
-
-          for (const trend of cache.trends || []) {
-            const key = normalizeTrendTitle(trend.title || '');
-            if (!key) continue;
-            const merged: TrendItem = {
-              ...trend,
-              nicheId,
-              normalizedKey: key,
-              firstSeenAt: cachedAt,
-              lastSeenAt: cachedAt,
-            };
-            await tx.table('trendDictionary').put(merged);
-          }
-
-          await tx.table('nicheTrendMeta').put({
-            nicheId,
-            lastFetchedAt: cachedAt,
-            viewCursor: 0,
-            pageSize: 10,
-          } satisfies NicheTrendMeta);
-        }
-      });
-  }
-}
-
-export const db = new ContentualDatabase();
+const reviveWeeklyPlan = (raw: any): WeeklyPlan => ({
+  ...raw,
+  weekStart: toDate(raw.weekStart),
+  weekEnd: toDate(raw.weekEnd),
+  generatedAt: toDate(raw.generatedAt),
+  days: (raw.days ?? []).map((d: any) => ({
+    ...d,
+    date: toDate(d.date),
+  })),
+});
 
 // ─── Profile ────────────────────────────────────────────────────────────────
 
-export const saveProfile = async (profile: CreatorProfile): Promise<void> => {
-  await db.profile.put(profile);
+const sbGetProfile = async (): Promise<CreatorProfile | undefined> => {
+  const { data, error } = await sb()
+    .from('profile')
+    .select('data')
+    .order('last_updated', { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  if (!data || data.length === 0) return undefined;
+  return reviveProfile(data[0].data);
+};
+
+const sbPutProfile = async (profile: CreatorProfile): Promise<void> => {
+  const { error } = await sb()
+    .from('profile')
+    .upsert({
+      id: profile.id,
+      data: profile,
+      generated_at: profile.generatedAt.toISOString(),
+      last_updated: profile.lastUpdated.toISOString(),
+    });
+  if (error) throw error;
 };
 
 export const getProfile = async (): Promise<CreatorProfile | undefined> => {
-  const profiles = await db.profile.toArray();
-  return profiles[0];
+  // Cache: most-recent by lastUpdated.
+  const cached = await tryCache(async (c) => {
+    const rows = await c.profile.orderBy('lastUpdated').reverse().limit(1).toArray();
+    return rows[0] ? reviveProfile(rows[0]) : undefined;
+  });
+  if (cached) return cached;
+
+  const fromSb = await sbGetProfile();
+  if (fromSb) {
+    await tryCache((c) => c.profile.put(fromSb));
+  }
+  return fromSb;
+};
+
+export const saveProfile = async (profile: CreatorProfile): Promise<void> => {
+  await sbPutProfile(profile);
+  await tryCache((c) => c.profile.put(profile));
 };
 
 // ─── Weekly Plans ───────────────────────────────────────────────────────────
 
-export const saveWeeklyPlan = async (plan: WeeklyPlan): Promise<void> => {
-  await db.weeklyPlans.put(plan);
+const sbGetCurrentWeeklyPlan = async (): Promise<WeeklyPlan | undefined> => {
+  const nowIso = new Date().toISOString();
+  const { data, error } = await sb()
+    .from('weekly_plans')
+    .select('data')
+    .lte('week_start', nowIso)
+    .gte('week_end', nowIso)
+    .order('week_start', { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  if (!data || data.length === 0) return undefined;
+  return reviveWeeklyPlan(data[0].data);
+};
+
+const sbPutWeeklyPlan = async (plan: WeeklyPlan): Promise<void> => {
+  const { error } = await sb()
+    .from('weekly_plans')
+    .upsert({
+      id: plan.id,
+      type: plan.type,
+      week_start: plan.weekStart.toISOString(),
+      week_end: plan.weekEnd.toISOString(),
+      data: plan,
+    });
+  if (error) throw error;
 };
 
 export const getCurrentWeeklyPlan = async (): Promise<WeeklyPlan | undefined> => {
-  const now = new Date();
-  const plans = await db.weeklyPlans.where('weekStart').below(now).toArray();
-  return plans.find((p) => p.weekEnd > now);
+  const cached = await tryCache(async (c) => {
+    const now = new Date();
+    const candidates = await c.weeklyPlans
+      .where('weekStart')
+      .belowOrEqual(now)
+      .toArray();
+    const match = candidates.find((p) => p.weekEnd >= now);
+    return match ? reviveWeeklyPlan(match) : undefined;
+  });
+  if (cached) return cached;
+
+  const fromSb = await sbGetCurrentWeeklyPlan();
+  if (fromSb) {
+    await tryCache((c) => c.weeklyPlans.put(fromSb));
+  }
+  return fromSb;
 };
 
-// ─── Trend dictionary helpers ───────────────────────────────────────────────
+export const saveWeeklyPlan = async (plan: WeeklyPlan): Promise<void> => {
+  await sbPutWeeklyPlan(plan);
+  await tryCache((c) => c.weeklyPlans.put(plan));
+};
 
-/** Soft-cap LRU eviction: drop oldest-by-lastSeenAt until ≤ SOFT_CAP_PER_NICHE. */
-export const enforceTrendSoftCap = async (nicheId: number): Promise<void> => {
-  const count = await db.trendDictionary.where('nicheId').equals(nicheId).count();
-  if (count <= SOFT_CAP_PER_NICHE) return;
-  const overflow = count - SOFT_CAP_PER_NICHE;
-  const oldest = await db.trendDictionary
-    .where('nicheId')
-    .equals(nicheId)
-    .sortBy('lastSeenAt');
-  const toDrop = oldest.slice(0, overflow);
-  await db.trendDictionary.bulkDelete(
-    toDrop.map((t) => [t.nicheId, t.normalizedKey] as [number, string])
+// ─── Trend dictionary ───────────────────────────────────────────────────────
+
+const trendRowToItem = (row: any): TrendItem => ({
+  id: row.id,
+  normalizedKey: row.normalized_key,
+  nicheId: row.niche_id,
+  niche: row.niche,
+  title: row.title,
+  description: row.description,
+  platforms: row.platforms ?? [],
+  trendingScore: row.trending_score ?? 0,
+  hashtags: row.hashtags ?? [],
+  audioTrack: row.audio_track ?? undefined,
+  exampleLinks: row.example_links ?? [],
+  firstSeenAt: toDate(row.first_seen_at),
+  lastSeenAt: toDate(row.last_seen_at),
+});
+
+const trendItemToRow = (t: TrendItem): Record<string, any> => ({
+  niche_id: t.nicheId,
+  normalized_key: t.normalizedKey,
+  id: t.id,
+  title: t.title,
+  description: t.description,
+  platforms: t.platforms,
+  trending_score: t.trendingScore,
+  hashtags: t.hashtags,
+  audio_track: t.audioTrack ?? null,
+  example_links: t.exampleLinks,
+  niche: t.niche,
+  first_seen_at: t.firstSeenAt.toISOString(),
+  last_seen_at: t.lastSeenAt.toISOString(),
+});
+
+const sbGetTrendByKey = async (
+  nicheId: number,
+  normalizedKey: string
+): Promise<TrendItem | undefined> => {
+  const { data, error } = await sb()
+    .from('trend_dictionary')
+    .select('*')
+    .eq('niche_id', nicheId)
+    .eq('normalized_key', normalizedKey)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? trendRowToItem(data) : undefined;
+};
+
+const sbPutTrend = async (trend: TrendItem): Promise<void> => {
+  const { error } = await sb()
+    .from('trend_dictionary')
+    .upsert(trendItemToRow(trend));
+  if (error) throw error;
+};
+
+const sbGetTrendsForNiche = async (nicheId: number): Promise<TrendItem[]> => {
+  const { data, error } = await sb()
+    .from('trend_dictionary')
+    .select('*')
+    .eq('niche_id', nicheId);
+  if (error) throw error;
+  return (data ?? []).map(trendRowToItem);
+};
+
+export const getTrendByKey = async (
+  nicheId: number,
+  normalizedKey: string
+): Promise<TrendItem | undefined> => {
+  const cached = await tryCache((c) =>
+    c.trendDictionary.get([nicheId, normalizedKey])
   );
+  if (cached) return cached;
+
+  const fromSb = await sbGetTrendByKey(nicheId, normalizedKey);
+  if (fromSb) {
+    await tryCache((c) => c.trendDictionary.put(fromSb));
+  }
+  return fromSb;
 };
 
-export const getTrendsForNiche = async (nicheId: number): Promise<TrendItem[]> => {
-  return await db.trendDictionary.where('nicheId').equals(nicheId).toArray();
+export const putTrend = async (trend: TrendItem): Promise<void> => {
+  await sbPutTrend(trend);
+  await tryCache((c) => c.trendDictionary.put(trend));
+};
+
+export const getTrendsForNiche = async (
+  nicheId: number
+): Promise<TrendItem[]> => {
+  // Cache-first by niche. We can't tell from the cache alone whether it's
+  // complete (writes-through ensure new ones land here, but cross-device
+  // fetches won't). For single-user app: if cache has any rows for the
+  // niche, trust it; otherwise pull from Supabase and populate.
+  const cached = await tryCache(async (c) =>
+    c.trendDictionary.where('nicheId').equals(nicheId).toArray()
+  );
+  if (cached && cached.length > 0) return cached;
+
+  const fromSb = await sbGetTrendsForNiche(nicheId);
+  if (fromSb.length > 0) {
+    await tryCache((c) => c.trendDictionary.bulkPut(fromSb));
+  }
+  return fromSb;
 };
 
 export const countTrendsForNiche = async (nicheId: number): Promise<number> => {
-  return await db.trendDictionary.where('nicheId').equals(nicheId).count();
+  const cached = await tryCache((c) =>
+    c.trendDictionary.where('nicheId').equals(nicheId).count()
+  );
+  if (typeof cached === 'number' && cached > 0) return cached;
+
+  const { count, error } = await sb()
+    .from('trend_dictionary')
+    .select('*', { count: 'exact', head: true })
+    .eq('niche_id', nicheId);
+  if (error) throw error;
+  return count ?? 0;
+};
+
+/** Soft-cap LRU eviction: drop oldest-by-last_seen_at until ≤ SOFT_CAP_PER_NICHE.
+ *  Runs against Supabase (source of truth); cache is then updated with the
+ *  evicted set. */
+export const enforceTrendSoftCap = async (nicheId: number): Promise<void> => {
+  // Use Supabase count rather than cache, since cache might be incomplete.
+  const { count, error: countErr } = await sb()
+    .from('trend_dictionary')
+    .select('*', { count: 'exact', head: true })
+    .eq('niche_id', nicheId);
+  if (countErr) throw countErr;
+  const total = count ?? 0;
+  if (total <= SOFT_CAP_PER_NICHE) return;
+  const overflow = total - SOFT_CAP_PER_NICHE;
+
+  const { data, error } = await sb()
+    .from('trend_dictionary')
+    .select('niche_id, normalized_key')
+    .eq('niche_id', nicheId)
+    .order('last_seen_at', { ascending: true })
+    .limit(overflow);
+  if (error) throw error;
+  if (!data || data.length === 0) return;
+
+  for (const row of data) {
+    const { error: delErr } = await sb()
+      .from('trend_dictionary')
+      .delete()
+      .eq('niche_id', row.niche_id)
+      .eq('normalized_key', row.normalized_key);
+    if (delErr) throw delErr;
+    await tryCache((c) =>
+      c.trendDictionary.delete([row.niche_id, row.normalized_key] as [number, string])
+    );
+  }
 };
 
 // ─── Niche trend meta ───────────────────────────────────────────────────────
 
+const metaRowToItem = (row: any): NicheTrendMeta => ({
+  nicheId: row.niche_id,
+  lastFetchedAt: toDate(row.last_fetched_at),
+  viewCursor: row.view_cursor ?? 0,
+  pageSize: row.page_size ?? 10,
+});
+
+const sbGetNicheTrendMeta = async (
+  nicheId: number
+): Promise<NicheTrendMeta | undefined> => {
+  const { data, error } = await sb()
+    .from('niche_trend_meta')
+    .select('*')
+    .eq('niche_id', nicheId)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? metaRowToItem(data) : undefined;
+};
+
+const sbPutNicheTrendMeta = async (meta: NicheTrendMeta): Promise<void> => {
+  const { error } = await sb()
+    .from('niche_trend_meta')
+    .upsert({
+      niche_id: meta.nicheId,
+      last_fetched_at: meta.lastFetchedAt.toISOString(),
+      view_cursor: meta.viewCursor,
+      page_size: meta.pageSize,
+    });
+  if (error) throw error;
+};
+
 export const getNicheTrendMeta = async (
   nicheId: number
 ): Promise<NicheTrendMeta | undefined> => {
-  return await db.nicheTrendMeta.get(nicheId);
+  const cached = await tryCache((c) => c.nicheTrendMeta.get(nicheId));
+  if (cached) return cached;
+
+  const fromSb = await sbGetNicheTrendMeta(nicheId);
+  if (fromSb) {
+    await tryCache((c) => c.nicheTrendMeta.put(fromSb));
+  }
+  return fromSb;
 };
 
 export const putNicheTrendMeta = async (meta: NicheTrendMeta): Promise<void> => {
-  await db.nicheTrendMeta.put(meta);
+  await sbPutNicheTrendMeta(meta);
+  await tryCache((c) => c.nicheTrendMeta.put(meta));
 };
 
 // ─── Content ideas cache ────────────────────────────────────────────────────
 
+const ideasRowToItem = (row: any): ContentIdeasCacheRow => ({
+  cacheKey: row.cache_key,
+  nicheIds: row.niche_ids ?? [],
+  platforms: row.platforms ?? [],
+  ideas: row.ideas ?? [],
+  trendTitlesUsed: row.trend_titles_used ?? [],
+  generatedAt: toDate(row.generated_at),
+  expiresAt: toDate(row.expires_at),
+});
+
+const sbGetContentIdeasCache = async (
+  cacheKey: string
+): Promise<ContentIdeasCacheRow | undefined> => {
+  const { data, error } = await sb()
+    .from('content_ideas_cache')
+    .select('*')
+    .eq('cache_key', cacheKey)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? ideasRowToItem(data) : undefined;
+};
+
+const sbPutContentIdeasCache = async (
+  row: ContentIdeasCacheRow
+): Promise<void> => {
+  const { error } = await sb()
+    .from('content_ideas_cache')
+    .upsert({
+      cache_key: row.cacheKey,
+      niche_ids: row.nicheIds,
+      platforms: row.platforms,
+      ideas: row.ideas,
+      trend_titles_used: row.trendTitlesUsed,
+      generated_at: row.generatedAt.toISOString(),
+      expires_at: row.expiresAt.toISOString(),
+    });
+  if (error) throw error;
+};
+
 export const getContentIdeasCache = async (
   cacheKey: string
 ): Promise<ContentIdeasCacheRow | undefined> => {
-  return await db.contentIdeasCache.get(cacheKey);
+  const cached = await tryCache((c) => c.contentIdeasCache.get(cacheKey));
+  if (cached && cached.expiresAt > new Date()) return cached;
+
+  const fromSb = await sbGetContentIdeasCache(cacheKey);
+  if (fromSb) {
+    await tryCache((c) => c.contentIdeasCache.put(fromSb));
+  }
+  return fromSb;
 };
 
 export const putContentIdeasCache = async (
   row: ContentIdeasCacheRow
 ): Promise<void> => {
-  await db.contentIdeasCache.put(row);
+  await sbPutContentIdeasCache(row);
+  await tryCache((c) => c.contentIdeasCache.put(row));
 };
 
 export const clearExpiredContentIdeasCaches = async (): Promise<void> => {
-  const now = new Date();
-  const expired = await db.contentIdeasCache
-    .filter((r) => r.expiresAt < now)
-    .toArray();
-  await db.contentIdeasCache.bulkDelete(expired.map((r) => r.cacheKey));
+  const nowIso = new Date().toISOString();
+  const { error } = await sb()
+    .from('content_ideas_cache')
+    .delete()
+    .lt('expires_at', nowIso);
+  if (error) throw error;
+
+  await tryCache(async (c) => {
+    const now = new Date();
+    const expired = await c.contentIdeasCache
+      .filter((r) => r.expiresAt < now)
+      .toArray();
+    if (expired.length > 0) {
+      await c.contentIdeasCache.bulkDelete(expired.map((r) => r.cacheKey));
+    }
+  });
 };
