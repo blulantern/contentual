@@ -2,6 +2,8 @@ import { AIService } from '../ai/ai-service';
 import {
   TrendItem,
   NicheTrendMeta,
+  HashtagRef,
+  ExternalCreatorRef,
 } from '@/types/trends';
 import { SocialPlatform } from '@/types/platforms';
 import { analyzeTrendsPrompt, SYSTEM_PROMPTS } from '../ai/prompts';
@@ -77,6 +79,8 @@ export class TrendDictionaryService {
    * Pure read: assembles the current view across nicheIds.
    * Each niche contributes pageSize items starting at its viewCursor.
    * Cross-niche order: lastSeenAt DESC, trendingScore DESC.
+   * Legacy records (hashtags/exampleLinks stored as bare string[]) are
+   * coerced to HashtagRef[] / ExternalCreatorRef[] on the way out.
    */
   async getView(nicheIds: number[]): Promise<TrendItem[]> {
     const collected: TrendItem[] = [];
@@ -91,7 +95,8 @@ export class TrendDictionaryService {
       const pageSize = meta?.pageSize ?? DEFAULT_VIEW_PAGE_SIZE;
       const cursor = meta?.viewCursor ?? 0;
       const slice = rows.slice(cursor, cursor + pageSize);
-      collected.push(...(slice.length > 0 ? slice : rows.slice(0, pageSize)));
+      const page = slice.length > 0 ? slice : rows.slice(0, pageSize);
+      collected.push(...page.map(normalizeTrendForView));
     }
     collected.sort(byLastSeenThenScore);
     return collected;
@@ -201,12 +206,16 @@ export class TrendDictionaryService {
             if (!key) continue;
             const existing = await db.trendDictionary.get([nicheId, key]);
             if (existing) {
+              const normalizedExisting = normalizeTrendForView(existing);
               await db.trendDictionary.put({
                 ...existing,
                 lastSeenAt: now,
                 trendingScore: Math.max(existing.trendingScore, trend.trendingScore),
-                hashtags: dedupe([...existing.hashtags, ...trend.hashtags]),
-                exampleLinks: dedupe([...existing.exampleLinks, ...trend.exampleLinks]),
+                hashtags: mergeHashtags(normalizedExisting.hashtags, trend.hashtags),
+                exampleLinks: mergeCreators(
+                  normalizedExisting.exampleLinks,
+                  trend.exampleLinks
+                ),
                 description:
                   trend.description.length > existing.description.length
                     ? trend.description
@@ -287,21 +296,29 @@ export class TrendDictionaryService {
     const niche = NICHE_CATEGORIES.find((n) => n.name === nicheName);
     const now = new Date();
 
-    return (parsed.trends || []).map((trend: any): TrendItem => ({
-      id: crypto.randomUUID(),
-      normalizedKey: '', // re-derived on merge
-      nicheId: niche?.id ?? 0,
-      niche: niche || NICHE_CATEGORIES[0],
-      title: String(trend.title ?? ''),
-      description: String(trend.description ?? ''),
-      platforms: Array.isArray(trend.platforms) ? trend.platforms : [],
-      trendingScore: Number(trend.trendingScore) || 0,
-      hashtags: Array.isArray(trend.hashtags) ? trend.hashtags : [],
-      audioTrack: trend.audioTrack || undefined,
-      exampleLinks: Array.isArray(trend.exampleCreators) ? trend.exampleCreators : [],
-      firstSeenAt: now,
-      lastSeenAt: now,
-    }));
+    return (parsed.trends || []).map((trend: any): TrendItem => {
+      const trendPlatforms: SocialPlatform[] = sanitizePlatforms(trend.platforms, []);
+      const fallbackPlatforms = trendPlatforms.length > 0 ? trendPlatforms : platforms;
+      return {
+        id: crypto.randomUUID(),
+        normalizedKey: '', // re-derived on merge
+        nicheId: niche?.id ?? 0,
+        niche: niche || NICHE_CATEGORIES[0],
+        title: String(trend.title ?? ''),
+        description: String(trend.description ?? ''),
+        platforms: trendPlatforms.length > 0 ? trendPlatforms : platforms,
+        trendingScore: Number(trend.trendingScore) || 0,
+        hashtags: (Array.isArray(trend.hashtags) ? trend.hashtags : [])
+          .map((h: any) => coerceHashtag(h, fallbackPlatforms))
+          .filter((h: HashtagRef | null): h is HashtagRef => h !== null),
+        audioTrack: trend.audioTrack || undefined,
+        exampleLinks: (Array.isArray(trend.exampleCreators) ? trend.exampleCreators : [])
+          .map((c: any) => coerceCreatorRef(c, fallbackPlatforms))
+          .filter((c: ExternalCreatorRef | null): c is ExternalCreatorRef => c !== null),
+        firstSeenAt: now,
+        lastSeenAt: now,
+      };
+    });
   }
 }
 
@@ -312,3 +329,124 @@ const byLastSeenThenScore = (a: TrendItem, b: TrendItem): number => {
 };
 
 const dedupe = <T>(arr: T[]): T[] => Array.from(new Set(arr));
+
+// ─── Coercion helpers ───────────────────────────────────────────────────────
+// Tolerate: (a) the new structured shape from the updated AI prompt,
+// (b) the legacy bare-string shape stored before this change.
+
+const VALID_PLATFORMS: ReadonlySet<SocialPlatform> = new Set([
+  'tiktok',
+  'instagram',
+  'youtube',
+  'twitter',
+]);
+
+const isValidPlatform = (p: any): p is SocialPlatform =>
+  typeof p === 'string' && VALID_PLATFORMS.has(p as SocialPlatform);
+
+const sanitizePlatforms = (
+  input: any,
+  fallback: SocialPlatform[]
+): SocialPlatform[] => {
+  if (!Array.isArray(input)) return fallback;
+  const out: SocialPlatform[] = [];
+  const seen = new Set<SocialPlatform>();
+  for (const v of input) {
+    if (isValidPlatform(v) && !seen.has(v)) {
+      out.push(v);
+      seen.add(v);
+    }
+  }
+  return out.length > 0 ? out : fallback;
+};
+
+const coerceHashtag = (
+  input: any,
+  fallback: SocialPlatform[]
+): HashtagRef | null => {
+  if (input == null) return null;
+  if (typeof input === 'string') {
+    const tag = input.trim();
+    if (!tag) return null;
+    return { tag, platforms: fallback.length > 0 ? fallback : [] };
+  }
+  if (typeof input === 'object' && typeof input.tag === 'string') {
+    const tag = input.tag.trim();
+    if (!tag) return null;
+    return { tag, platforms: sanitizePlatforms(input.platforms, fallback) };
+  }
+  return null;
+};
+
+const coerceCreatorRef = (
+  input: any,
+  fallback: SocialPlatform[]
+): ExternalCreatorRef | null => {
+  if (input == null) return null;
+  if (typeof input === 'string') {
+    const handle = input.trim();
+    if (!handle) return null;
+    return { handle, platforms: fallback.length > 0 ? fallback : [] };
+  }
+  if (typeof input === 'object' && typeof input.handle === 'string') {
+    const handle = input.handle.trim();
+    if (!handle) return null;
+    return {
+      handle,
+      platforms: sanitizePlatforms(input.platforms, fallback),
+    };
+  }
+  return null;
+};
+
+const mergeHashtags = (
+  existing: HashtagRef[],
+  incoming: HashtagRef[]
+): HashtagRef[] => {
+  const byTag = new Map<string, HashtagRef>();
+  for (const ref of [...existing, ...incoming]) {
+    const key = ref.tag.toLowerCase().replace(/^#/, '');
+    const prior = byTag.get(key);
+    if (prior) {
+      const platforms = Array.from(new Set([...prior.platforms, ...ref.platforms]));
+      byTag.set(key, { tag: prior.tag, platforms });
+    } else {
+      byTag.set(key, { tag: ref.tag, platforms: [...ref.platforms] });
+    }
+  }
+  return Array.from(byTag.values());
+};
+
+const mergeCreators = (
+  existing: ExternalCreatorRef[],
+  incoming: ExternalCreatorRef[]
+): ExternalCreatorRef[] => {
+  const byHandle = new Map<string, ExternalCreatorRef>();
+  for (const ref of [...existing, ...incoming]) {
+    const key = ref.handle.toLowerCase().replace(/^@/, '');
+    const prior = byHandle.get(key);
+    if (prior) {
+      const platforms = Array.from(new Set([...prior.platforms, ...ref.platforms]));
+      byHandle.set(key, { handle: prior.handle, platforms });
+    } else {
+      byHandle.set(key, { handle: ref.handle, platforms: [...ref.platforms] });
+    }
+  }
+  return Array.from(byHandle.values());
+};
+
+/** Normalize a stored TrendItem so callers always see the canonical shape. */
+const normalizeTrendForView = (raw: any): TrendItem => {
+  const trendPlatforms: SocialPlatform[] = sanitizePlatforms(raw.platforms, []);
+  const fallback = trendPlatforms.length > 0 ? trendPlatforms : [];
+  return {
+    ...raw,
+    platforms: trendPlatforms,
+    hashtags: (Array.isArray(raw.hashtags) ? raw.hashtags : [])
+      .map((h: any) => coerceHashtag(h, fallback))
+      .filter((h: HashtagRef | null): h is HashtagRef => h !== null),
+    exampleLinks: (Array.isArray(raw.exampleLinks) ? raw.exampleLinks : [])
+      .map((c: any) => coerceCreatorRef(c, fallback))
+      .filter((c: ExternalCreatorRef | null): c is ExternalCreatorRef => c !== null),
+  };
+};

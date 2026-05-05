@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Header from '@/components/layout/Header';
 import NichePicker from '@/components/niche-picker/NichePicker';
+import PlatformLink from '@/components/platform-link/PlatformLink';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,13 +16,6 @@ import { applyCompatibilityScores } from '@/lib/services/niche-compatibility';
 import { Users, Target, TrendingUp, ExternalLink, Pencil, Loader2 } from 'lucide-react';
 import { getPlatformUrl } from '@/lib/data/platforms';
 import type { Influencer, NicheMatch, SimilarCreator } from '@/types/profile';
-
-const PLATFORM_INITIAL: Record<string, string> = {
-  tiktok: 'T',
-  instagram: 'I',
-  youtube: 'Y',
-  twitter: 'X',
-};
 
 const truncate = (s: string, n: number): string =>
   s.length > n ? `${s.slice(0, n).trimEnd()}…` : s;
@@ -261,31 +255,21 @@ export default function ProfilePage() {
                         <div className="flex flex-wrap gap-2">
                           {matched.map((inf, i) => {
                             const handle = (inf.handle || '').replace(/^@/, '');
-                            const url = handle ? getPlatformUrl(inf.platform, handle) : null;
-                            const initial = PLATFORM_INITIAL[inf.platform] || '?';
-                            return url ? (
-                              <a
+                            return handle ? (
+                              <PlatformLink
                                 key={i}
-                                href={url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-2 px-3 py-1.5 bg-gradient-to-br from-contentual-pink-50 to-contentual-peach-50 rounded-lg border border-contentual-pink/10 hover:border-contentual-pink/40 hover:shadow-sm transition-all text-sm group"
-                                title={`${inf.specialization || ''} · ${inf.followersRange}`}
+                                platform={inf.platform}
+                                href={getPlatformUrl(inf.platform, handle)}
+                                variant="chip"
+                                title={`${inf.specialization || inf.name} · ${inf.followersRange}`}
                               >
-                                <span className="w-5 h-5 bg-gradient-primary text-white text-[10px] font-bold rounded flex items-center justify-center">
-                                  {initial}
-                                </span>
-                                <span className="font-medium text-gray-800">{inf.name}</span>
-                                <ExternalLink className="w-3 h-3 text-gray-400 group-hover:text-contentual-pink" />
-                              </a>
+                                {inf.name}
+                              </PlatformLink>
                             ) : (
                               <span
                                 key={i}
                                 className="inline-flex items-center gap-2 px-3 py-1.5 bg-gray-50 rounded-lg border border-gray-200 text-sm text-gray-700"
                               >
-                                <span className="w-5 h-5 bg-gray-300 text-white text-[10px] font-bold rounded flex items-center justify-center">
-                                  {initial}
-                                </span>
                                 {inf.name}
                               </span>
                             );
@@ -316,28 +300,27 @@ export default function ProfilePage() {
               <div className="grid md:grid-cols-2 gap-4">
                 {profile.similarCreators.map((creator: SimilarCreator, idx) => {
                   const handle = (creator.handle || '').replace(/^@/, '');
-                  const url = handle ? getPlatformUrl(creator.platform, handle) : null;
-                  const NameTag: any = url ? 'a' : 'span';
-                  const nameProps: any = url
-                    ? { href: url, target: '_blank', rel: 'noopener noreferrer' }
-                    : {};
                   return (
                     <div
                       key={idx}
                       className="p-5 bg-white rounded-2xl border-2 border-gray-100 hover:border-contentual-coral/30 transition-colors"
                     >
                       <div className="flex items-start justify-between gap-3 mb-2">
-                        <NameTag
-                          {...nameProps}
-                          className={`font-bold text-base text-gray-900 ${
-                            url
-                              ? 'hover:text-contentual-pink underline-offset-2 hover:underline inline-flex items-center gap-1'
-                              : ''
-                          }`}
-                        >
-                          {creator.name}
-                          {url && <ExternalLink className="w-3 h-3 inline" />}
-                        </NameTag>
+                        {handle ? (
+                          <PlatformLink
+                            platform={creator.platform}
+                            href={getPlatformUrl(creator.platform, handle)}
+                            variant="inline"
+                            title={`${creator.name} on ${creator.platform}`}
+                            className="text-base"
+                          >
+                            {creator.name}
+                          </PlatformLink>
+                        ) : (
+                          <span className="font-bold text-base text-gray-900">
+                            {creator.name}
+                          </span>
+                        )}
                         <Badge variant="secondary" size="sm">
                           {creator.platform}
                         </Badge>

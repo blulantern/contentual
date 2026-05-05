@@ -9,6 +9,14 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
+        'platform-tiktok': '#000000',
+        'platform-instagram': '#E4405F',
+        'platform-youtube': '#FF0000',
+        'platform-twitter': '#1DA1F2',
+        'platform-tiktok-soft': '#1a1a1a',
+        'platform-instagram-soft': '#FCE7EF',
+        'platform-youtube-soft': '#FFE6E6',
+        'platform-twitter-soft': '#E6F4FB',
         'contentual-pink': {
           DEFAULT: '#E178C5',
           50: '#FDF4FA',

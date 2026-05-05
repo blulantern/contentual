@@ -1,6 +1,18 @@
 import { SocialPlatform } from './platforms';
 import { NicheCategory } from './profile';
 
+/** A hashtag with the platforms it actually trends on. */
+export interface HashtagRef {
+  tag: string;
+  platforms: SocialPlatform[];
+}
+
+/** An external creator handle with the platforms it appears on. */
+export interface ExternalCreatorRef {
+  handle: string;
+  platforms: SocialPlatform[];
+}
+
 export interface TrendItem {
   id: string;
   normalizedKey: string;
@@ -10,9 +22,9 @@ export interface TrendItem {
   description: string;
   platforms: SocialPlatform[];
   trendingScore: number;
-  hashtags: string[];
+  hashtags: HashtagRef[];
   audioTrack?: string;
-  exampleLinks: string[];
+  exampleLinks: ExternalCreatorRef[];
   firstSeenAt: Date;
   lastSeenAt: Date;
 }

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Header from '@/components/layout/Header';
 import RefreshScheduler from '@/components/scheduler/RefreshScheduler';
+import PlatformLink from '@/components/platform-link/PlatformLink';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -15,7 +16,12 @@ import { IdeaService, IdeaResult } from '@/lib/services/idea-service';
 import { TrendItem, ContentIdea } from '@/types/trends';
 import { SocialPlatform } from '@/types/platforms';
 import { getNicheByName } from '@/lib/data/niche-categories';
-import { getPlatformUrl, hashtagUrl, searchUrl } from '@/lib/data/platforms';
+import {
+  getPlatformUrl,
+  hashtagUrl,
+  searchUrl,
+  platformLabel as platformLabelOf,
+} from '@/lib/data/platforms';
 import {
   RefreshCw,
   Loader2,
@@ -312,8 +318,6 @@ export default function TrendsPage() {
 // ─── trend card ──────────────────────────────────────────────────────────────
 
 function TrendCard({ trend, idx }: { trend: TrendItem; idx: number }) {
-  const primaryPlatform = trend.platforms[0];
-
   return (
     <Card
       variant="elevated"
@@ -356,45 +360,48 @@ function TrendCard({ trend, idx }: { trend: TrendItem; idx: number }) {
               </p>
             )}
 
-            {trend.hashtags.length > 0 && primaryPlatform && (
+            {trend.hashtags.length > 0 && (
               <div className="flex items-start gap-2 flex-wrap mb-3">
                 <Hash className="w-4 h-4 text-contentual-pink mt-1 flex-shrink-0" />
-                {trend.hashtags.map((tag) => (
-                  <a
-                    key={tag}
-                    href={hashtagUrl(primaryPlatform, tag)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-2.5 py-1 bg-white rounded-md text-xs text-contentual-pink font-semibold border border-contentual-pink/20 hover:border-contentual-pink hover:bg-contentual-pink-50 transition-colors"
-                    title={`Open ${tag} on ${primaryPlatform}`}
-                  >
-                    {tag.startsWith('#') ? tag : `#${tag}`}
-                  </a>
-                ))}
+                {trend.hashtags.flatMap((ref) => {
+                  const display = ref.tag.startsWith('#') ? ref.tag : `#${ref.tag}`;
+                  const tagPlatforms =
+                    ref.platforms.length > 0 ? ref.platforms : trend.platforms;
+                  return tagPlatforms.map((platform) => (
+                    <PlatformLink
+                      key={`${ref.tag}-${platform}`}
+                      platform={platform}
+                      href={hashtagUrl(platform, ref.tag)}
+                      variant="compact"
+                    >
+                      {display}
+                    </PlatformLink>
+                  ));
+                })}
               </div>
             )}
 
-            {trend.exampleLinks.length > 0 && primaryPlatform && (
+            {trend.exampleLinks.length > 0 && (
               <div className="pt-3 border-t border-gray-100">
                 <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">
                   Examples
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  {trend.exampleLinks.map((link) => {
-                    const handle = link.replace(/^@/, '').trim();
-                    if (!handle) return null;
-                    return (
-                      <a
-                        key={link}
-                        href={getPlatformUrl(primaryPlatform, handle)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 text-sm text-gray-700 hover:text-contentual-pink underline-offset-2 hover:underline"
+                  {trend.exampleLinks.flatMap((ref) => {
+                    const handle = ref.handle.replace(/^@/, '').trim();
+                    if (!handle) return [];
+                    const creatorPlatforms =
+                      ref.platforms.length > 0 ? ref.platforms : trend.platforms;
+                    return creatorPlatforms.map((platform) => (
+                      <PlatformLink
+                        key={`${ref.handle}-${platform}`}
+                        platform={platform}
+                        href={getPlatformUrl(platform, handle)}
+                        variant="chip"
                       >
                         @{handle}
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    );
+                      </PlatformLink>
+                    ));
                   })}
                 </div>
               </div>
@@ -460,24 +467,23 @@ function IdeaCard({
           </span>
         </div>
 
-        {/* Platform pills as actionable buttons */}
+        {/* Platform pills — brand-colored so destination is obvious */}
         {idea.platforms.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-gray-500 self-center">
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
               See examples on
             </span>
             {idea.platforms.map((p) => (
-              <a
+              <PlatformLink
                 key={p}
+                platform={p}
                 href={searchUrl(p, idea.title)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white border border-gray-200 hover:border-contentual-pink hover:bg-contentual-pink-50 text-sm text-gray-700 hover:text-contentual-pink transition-colors capitalize"
-                title={`Search "${idea.title}" on ${p}`}
+                variant="compact"
+                title={`Search "${idea.title}" on ${platformLabelOf(p)}`}
+                className="capitalize"
               >
                 {p}
-                <ExternalLink className="w-3 h-3 opacity-60" />
-              </a>
+              </PlatformLink>
             ))}
           </div>
         )}

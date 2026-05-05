@@ -168,6 +168,8 @@ Platforms to consider: ${platforms.join(', ')}
 
 Provide 10-15 trending topics, formats, or challenges that are currently popular.
 
+For EACH hashtag and creator example, list the specific platform(s) where it actually trends — a hashtag may be huge on TikTok but inactive on YouTube, and creators are usually anchored to one or two platforms. Do not assume a hashtag/creator is on every platform the trend itself spans.
+
 Respond in JSON format:
 {
   "trends": [
@@ -177,14 +179,20 @@ Respond in JSON format:
       "niche": "Exact niche name from list",
       "platforms": ["platform1", "platform2"],
       "trendingScore": 85,
-      "hashtags": ["#hashtag1", "#hashtag2"],
+      "hashtags": [
+        {"tag": "#hashtag1", "platforms": ["tiktok", "instagram"]},
+        {"tag": "#hashtag2", "platforms": ["tiktok"]}
+      ],
       "audioTrack": "Popular audio if applicable",
-      "exampleCreators": ["@creator1", "@creator2"]
+      "exampleCreators": [
+        {"handle": "@creator1", "platforms": ["tiktok"]},
+        {"handle": "@creator2", "platforms": ["instagram", "youtube"]}
+      ]
     }
   ]
 }
 
-CRITICAL: Return ONLY the JSON object above. No explanations, no markdown formatting, no code blocks. Just raw JSON starting with { and ending with }.`;
+CRITICAL: Return ONLY the JSON object above. Each hashtag and creator MUST be an object with a non-empty "platforms" array. Use ONLY platform names from this list: tiktok, instagram, youtube, twitter. No explanations, no markdown formatting, no code blocks.`;
 };
 
 export const generateContentIdeasPrompt = (
