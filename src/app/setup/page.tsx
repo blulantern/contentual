@@ -39,12 +39,16 @@ export default function SetupPage() {
     challenges: [],
     preferredFormats: [],
     equipment: [],
+    contentTopics: '',
+    recentPostTitles: [],
+    audience: '',
   });
 
   // Raw input values for comma-separated fields
   const [challengesInput, setChallengesInput] = useState('');
   const [formatsInput, setFormatsInput] = useState('');
   const [equipmentInput, setEquipmentInput] = useState('');
+  const [recentPostsInput, setRecentPostsInput] = useState('');
 
   const handlePlatformChange = (platform: string, username: string) => {
     setPlatforms((prev) =>
@@ -75,6 +79,11 @@ export default function SetupPage() {
       return;
     }
 
+    if (!survey.contentTopics.trim()) {
+      alert('Please describe what your content is about — this drives niche accuracy');
+      return;
+    }
+
     setStep('generating');
     setIsGenerating(true);
 
@@ -85,11 +94,13 @@ export default function SetupPage() {
       const connectedPlatforms = platforms.filter((p) => p.connected);
 
       // Process comma-separated inputs into arrays
-      const processedSurvey = {
+      const processedSurvey: CreatorSurvey = {
         ...survey,
         challenges: challengesInput.split(',').map((s) => s.trim()).filter(Boolean),
         preferredFormats: formatsInput.split(',').map((s) => s.trim()).filter(Boolean),
         equipment: equipmentInput.split(',').map((s) => s.trim()).filter(Boolean),
+        recentPostTitles: recentPostsInput.split(',').map((s) => s.trim()).filter(Boolean),
+        audience: survey.audience?.trim() || undefined,
       };
 
       const profile = await profileService.generateProfile(connectedPlatforms, processedSurvey);
@@ -204,9 +215,48 @@ export default function SetupPage() {
             </CardHeader>
             <CardContent className="space-y-8">
               <div className="space-y-3">
+                <Label className="text-base">
+                  What is your content actually about?{' '}
+                  <span className="text-contentual-pink">*</span>
+                </Label>
+                <textarea
+                  className="flex min-h-[100px] w-full rounded-2xl border-2 border-gray-200 bg-white px-5 py-4 text-base transition-all focus:border-contentual-pink focus:ring-4 focus:ring-contentual-pink/20 focus:outline-none resize-none leading-relaxed"
+                  placeholder="e.g., Mom of three sharing parenting hacks, family vlogs, and dating advice for single parents"
+                  value={survey.contentTopics}
+                  onChange={(e) => setSurvey({ ...survey, contentTopics: e.target.value })}
+                />
+                <p className="text-sm text-gray-500">
+                  Be specific — this is the strongest signal we have for matching your niche.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <Label className="text-base">3 Recent Post or Video Titles</Label>
+                <Input
+                  size="lg"
+                  placeholder="e.g., Morning routine with toddlers, Date night ideas for busy moms, How I packed lunch in 5 min"
+                  value={recentPostsInput}
+                  onChange={(e) => setRecentPostsInput(e.target.value)}
+                  className="text-base"
+                />
+                <p className="text-sm text-gray-500">Comma-separated. Concrete titles produce better matches than abstract descriptions.</p>
+              </div>
+
+              <div className="space-y-3">
+                <Label className="text-base">Who is your audience? (optional)</Label>
+                <Input
+                  size="lg"
+                  placeholder="e.g., Working moms in their 30s"
+                  value={survey.audience || ''}
+                  onChange={(e) => setSurvey({ ...survey, audience: e.target.value })}
+                  className="text-base"
+                />
+              </div>
+
+              <div className="space-y-3">
                 <Label className="text-base">What are your content creation goals?</Label>
                 <textarea
-                  className="flex min-h-[140px] w-full rounded-2xl border-2 border-gray-200 bg-white px-5 py-4 text-base transition-all focus:border-contentual-pink focus:ring-4 focus:ring-contentual-pink/20 focus:outline-none resize-none leading-relaxed"
+                  className="flex min-h-[100px] w-full rounded-2xl border-2 border-gray-200 bg-white px-5 py-4 text-base transition-all focus:border-contentual-pink focus:ring-4 focus:ring-contentual-pink/20 focus:outline-none resize-none leading-relaxed"
                   placeholder="I want to grow my audience, build a personal brand, share my expertise..."
                   value={survey.goals}
                   onChange={(e) => setSurvey({ ...survey, goals: e.target.value })}
@@ -287,7 +337,6 @@ export default function SetupPage() {
         {step === 'generating' && (
           <Card variant="elevated" className="animate-fade-up animation-delay-200">
             <CardContent className="py-20 text-center">
-              <div className="loading-spinner mx-auto mb-8"></div>
               <h2 className="text-3xl sm:text-4xl font-bold mb-4 text-gray-800">Generating Your Profile</h2>
               <p className="text-gray-600 text-lg leading-relaxed max-w-md mx-auto">
                 AI is analyzing your platforms and creating a personalized content strategy...

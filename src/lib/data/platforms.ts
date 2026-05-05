@@ -34,7 +34,33 @@ export const SUPPORTED_PLATFORMS: SocialPlatform[] = [
   'twitter',
 ];
 
+const stripHandle = (h: string): string => h.replace(/^@/, '').trim();
+
 export const getPlatformUrl = (platform: SocialPlatform, username: string): string => {
   const metadata = PLATFORM_METADATA[platform];
-  return metadata.urlPattern.replace('{username}', username);
+  return metadata.urlPattern.replace('{username}', stripHandle(username));
+};
+
+const HASHTAG_URLS: Record<SocialPlatform, (tag: string) => string> = {
+  tiktok: (t) => `https://www.tiktok.com/tag/${t}`,
+  instagram: (t) => `https://www.instagram.com/explore/tags/${t}/`,
+  youtube: (t) => `https://www.youtube.com/hashtag/${t}`,
+  twitter: (t) => `https://twitter.com/hashtag/${t}`,
+};
+
+export const hashtagUrl = (platform: SocialPlatform, tag: string): string => {
+  const t = encodeURIComponent(tag.replace(/^#/, '').trim());
+  return HASHTAG_URLS[platform](t);
+};
+
+const SEARCH_URLS: Record<SocialPlatform, (q: string) => string> = {
+  tiktok: (q) => `https://www.tiktok.com/search?q=${q}`,
+  instagram: (q) => `https://www.instagram.com/explore/search/keyword/?q=${q}`,
+  youtube: (q) => `https://www.youtube.com/results?search_query=${q}`,
+  twitter: (q) => `https://twitter.com/search?q=${q}`,
+};
+
+export const searchUrl = (platform: SocialPlatform, query: string): string => {
+  const q = encodeURIComponent(query.trim());
+  return SEARCH_URLS[platform](q);
 };

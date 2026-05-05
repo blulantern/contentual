@@ -3,19 +3,16 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Header from '@/components/layout/Header';
+import RefreshScheduler from '@/components/scheduler/RefreshScheduler';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useProfileStore } from '@/store/profile-store';
-import { useConfigStore } from '@/store/config-store';
-import { AIService } from '@/lib/ai/ai-service';
-import { TrendCacheService } from '@/lib/services/trend-cache-service';
 import { Sparkles, TrendingUp, Calendar, ArrowRight, Clock, Users } from 'lucide-react';
 import Link from 'next/link';
 
 export default function DashboardPage() {
   const router = useRouter();
   const { profile, loadProfile } = useProfileStore();
-  const { config } = useConfigStore();
 
   useEffect(() => {
     loadProfile();
@@ -30,45 +27,10 @@ export default function DashboardPage() {
     }
   }, [profile, router]);
 
-  // Pre-fetch trends in background when dashboard loads
-  useEffect(() => {
-    if (!profile) return;
-
-    const prefetchTrends = async () => {
-      try {
-        const aiService = new AIService(config);
-        const trendCacheService = new TrendCacheService(aiService);
-
-        const niches = profile.topNiches.map((n) => n.name);
-        const platforms = profile.platforms.map((p) => p.platform);
-
-        // Check if we already have fresh cache
-        const hasFreshCache = await trendCacheService.hasFreshCache(niches);
-        if (!hasFreshCache) {
-          console.log('Pre-fetching trends in background...');
-          // Run in background (don't await) - silently cache trends
-          trendCacheService.prefetchAllNicheTrends(niches, platforms).catch((error) => {
-            console.error('Background trend pre-fetch failed:', error);
-          });
-        } else {
-          console.log('Fresh trend cache already exists');
-        }
-      } catch (error) {
-        console.error('Background trend pre-fetch initialization failed:', error);
-        // Fail silently - this is a background optimization
-      }
-    };
-
-    prefetchTrends();
-  }, [profile, config]);
-
   if (!profile) {
     return (
       <div className="min-h-screen bg-gradient-hero flex items-center justify-center">
-        <div className="text-center">
-          <div className="loading-spinner h-12 w-12 mx-auto mb-4"></div>
-          <p className="text-gray-600 font-medium">Loading your profile...</p>
-        </div>
+        <p className="text-gray-600 font-medium">Loading your profile…</p>
       </div>
     );
   }
@@ -127,6 +89,7 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen bg-gradient-hero">
       <Header />
+      <RefreshScheduler />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-12">
         {/* Welcome Section */}

@@ -3,16 +3,25 @@ import { NicheCategory } from './profile';
 
 export interface TrendItem {
   id: string;
+  normalizedKey: string;
+  nicheId: number;
+  niche: NicheCategory;
   title: string;
   description: string;
-  niche: NicheCategory;
   platforms: SocialPlatform[];
   trendingScore: number;
   hashtags: string[];
   audioTrack?: string;
   exampleLinks: string[];
-  dateAdded: Date;
-  lastUpdated: Date;
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+}
+
+export interface NicheTrendMeta {
+  nicheId: number;
+  lastFetchedAt: Date;
+  viewCursor: number;
+  pageSize: number;
 }
 
 export type ContentDifficulty = 'beginner' | 'intermediate' | 'advanced';
@@ -28,4 +37,14 @@ export interface ContentIdea {
   platforms: SocialPlatform[];
   steps: string[];
   relatedTrends: string[];
+}
+
+export interface ContentIdeasCacheRow {
+  cacheKey: string;
+  nicheIds: number[];
+  platforms: SocialPlatform[];
+  ideas: ContentIdea[];
+  trendTitlesUsed: string[];
+  generatedAt: Date;
+  expiresAt: Date;
 }

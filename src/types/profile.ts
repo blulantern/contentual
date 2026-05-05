@@ -12,6 +12,12 @@ export interface CreatorSurvey {
   challenges: string[];
   preferredFormats: string[];
   equipment: string[];
+  /** Free-form: what the creator's content is actually about. */
+  contentTopics: string;
+  /** Recent post / video titles — concrete content signal for niche matching. */
+  recentPostTitles: string[];
+  /** Optional: who watches / who they want to watch. */
+  audience?: string;
 }
 
 export interface NicheMatch extends NicheCategory {
@@ -22,6 +28,8 @@ export interface NicheMatch extends NicheCategory {
 export interface SimilarCreator {
   name: string;
   platform: SocialPlatform;
+  /** Optional handle for linking to the creator's platform profile. */
+  handle?: string;
   followerCount: string;
   niche: string;
   keySuccessFactors: string[];

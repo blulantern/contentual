@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Header from '@/components/layout/Header';
+import RefreshScheduler from '@/components/scheduler/RefreshScheduler';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -9,106 +10,223 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useProfileStore } from '@/store/profile-store';
 import { useConfigStore } from '@/store/config-store';
 import { AIService } from '@/lib/ai/ai-service';
-import { TrendService } from '@/lib/services/trend-service';
-import { TrendCacheService } from '@/lib/services/trend-cache-service';
+import { TrendDictionaryService, RegenerateResult } from '@/lib/services/trend-cache-service';
+import { IdeaService, IdeaResult } from '@/lib/services/idea-service';
 import { TrendItem, ContentIdea } from '@/types/trends';
-import { RefreshCw, Loader2, TrendingUp, Hash, Clock, Zap } from 'lucide-react';
+import { SocialPlatform } from '@/types/platforms';
+import { getNicheByName } from '@/lib/data/niche-categories';
+import { getPlatformUrl, hashtagUrl, searchUrl } from '@/lib/data/platforms';
+import {
+  RefreshCw,
+  Loader2,
+  TrendingUp,
+  Hash,
+  Clock,
+  Zap,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  AlertCircle,
+} from 'lucide-react';
+
+const formatDuration = (ms: number): string => {
+  if (ms <= 0) return 'now';
+  const minutes = Math.ceil(ms / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`;
+};
 
 export default function TrendsPage() {
   const { profile } = useProfileStore();
   const { config } = useConfigStore();
+
   const [trends, setTrends] = useState<TrendItem[]>([]);
-  const [contentIdeas, setContentIdeas] = useState<ContentIdea[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [usingCache, setUsingCache] = useState(false);
+  const [ideas, setIdeas] = useState<ContentIdea[]>([]);
+  const [ideasMeta, setIdeasMeta] = useState<{ fromCache: boolean; stale: boolean }>({
+    fromCache: false,
+    stale: false,
+  });
+  const [regenMeta, setRegenMeta] = useState<RegenerateResult | null>(null);
+  const [expandedIdeas, setExpandedIdeas] = useState<Set<string>>(new Set());
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRegenerating, setIsRegenerating] = useState(false);
 
-  const fetchTrends = async (forceRefresh: boolean = false) => {
+  const niches = useMemo(() => profile?.topNiches.map((n) => n.name) ?? [], [profile]);
+  const platforms: SocialPlatform[] = useMemo(
+    () => profile?.platforms.map((p) => p.platform) ?? [],
+    [profile]
+  );
+  const nicheIds = useMemo(
+    () =>
+      niches
+        .map((n) => getNicheByName(n)?.id)
+        .filter((x): x is number => typeof x === 'number'),
+    [niches]
+  );
+
+  // Fast first paint: read view + ideas from cache, never auto-fetch.
+  useEffect(() => {
     if (!profile) return;
+    let cancelled = false;
+    (async () => {
+      setIsLoading(true);
+      try {
+        const aiService = new AIService(config);
+        const trendsService = new TrendDictionaryService(aiService);
+        const ideaService = new IdeaService(aiService);
 
-    setIsLoading(true);
-    setUsingCache(false);
+        const cachedTrends = await trendsService.getView(nicheIds);
+        if (cancelled) return;
+        setTrends(cachedTrends);
+
+        const trendTitles = cachedTrends.slice(0, 5).map((t) => t.title);
+        const ideaResult: IdeaResult = await ideaService.getIdeas(
+          niches,
+          platforms,
+          trendTitles,
+          'view'
+        );
+        if (cancelled) return;
+        setIdeas(ideaResult.ideas);
+        setIdeasMeta({
+          fromCache: ideaResult.fromCache,
+          stale: ideaResult.staleVsCurrentTrends,
+        });
+      } catch (err) {
+        console.error('Failed to load cached trends/ideas:', err);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.id]);
+
+  const handleRegenerate = async () => {
+    if (!profile) return;
+    setIsRegenerating(true);
     try {
       const aiService = new AIService(config);
-      const trendCacheService = new TrendCacheService(aiService);
-      const trendService = new TrendService(aiService);
+      const trendsService = new TrendDictionaryService(aiService);
+      const ideaService = new IdeaService(aiService);
 
-      const niches = profile.topNiches.map((n) => n.name);
-      const platforms = profile.platforms.map((p) => p.platform);
+      const result = await trendsService.regenerate(niches, platforms);
+      setTrends(result.trends);
+      setRegenMeta(result);
 
-      // Use cached service for trends (checks cache automatically)
-      const fetchedTrends = await trendCacheService.getTrendsForNiches(
-        niches,
-        platforms,
-        forceRefresh
-      );
-      setTrends(fetchedTrends);
-
-      // Check if we're using cached data
-      if (!forceRefresh) {
-        const hasFreshCache = await trendCacheService.hasFreshCache(niches);
-        setUsingCache(hasFreshCache);
-      }
-
-      // Generate content ideas based on top trends
-      const trendTitles = fetchedTrends.slice(0, 5).map((t) => t.title);
-      const ideas = await trendService.generateContentIdeas(niches, platforms, trendTitles);
-      setContentIdeas(ideas);
-    } catch (error) {
-      console.error('Failed to fetch trends:', error);
+      const trendTitles = result.trends.slice(0, 5).map((t) => t.title);
+      // Only force AI for ideas if we got fresh trends; otherwise serve cached.
+      const intent = result.source === 'fresh' ? 'regenerate' : 'view';
+      const ideaResult = await ideaService.getIdeas(niches, platforms, trendTitles, intent);
+      setIdeas(ideaResult.ideas);
+      setIdeasMeta({
+        fromCache: ideaResult.fromCache,
+        stale: ideaResult.staleVsCurrentTrends,
+      });
+    } catch (err) {
+      console.error('Regenerate failed:', err);
+      alert(`Regenerate failed: ${(err as Error).message}`);
     } finally {
-      setIsLoading(false);
+      setIsRegenerating(false);
     }
   };
 
-  useEffect(() => {
-    // Load from cache first (fast initial load)
-    fetchTrends(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const handleRefreshIdeas = async () => {
+    if (!profile) return;
+    setIsRegenerating(true);
+    try {
+      const aiService = new AIService(config);
+      const ideaService = new IdeaService(aiService);
+      const trendTitles = trends.slice(0, 5).map((t) => t.title);
+      const ideaResult = await ideaService.getIdeas(
+        niches,
+        platforms,
+        trendTitles,
+        'regenerate'
+      );
+      setIdeas(ideaResult.ideas);
+      setIdeasMeta({
+        fromCache: ideaResult.fromCache,
+        stale: ideaResult.staleVsCurrentTrends,
+      });
+    } catch (err) {
+      console.error('Refresh ideas failed:', err);
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  const toggleSteps = (id: string) =>
+    setExpandedIdeas((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const cycledMessage = regenMeta && regenMeta.source === 'cycled'
+    ? regenMeta.cycledAroundCompleteSet
+      ? `You've seen everything we have for now. Next fresh fetch in ${formatDuration(regenMeta.nextFreshAt.getTime() - Date.now())}.`
+      : `Showing more cached trends. Next fresh fetch in ${formatDuration(regenMeta.nextFreshAt.getTime() - Date.now())}.`
+    : null;
 
   return (
     <div className="min-h-screen bg-gradient-hero">
       <Header />
+      <RefreshScheduler />
 
-      <main className="max-w-7xl mx-auto px-4 py-12 lg:py-20">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 mb-12 animate-fade-up">
+      <main className="max-w-7xl mx-auto px-4 py-12 lg:py-16">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 mb-8 animate-fade-up">
           <div>
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold mb-4 tracking-tight">
+            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold mb-3 tracking-tight">
               Trending <span className="gradient-text">Content</span>
             </h1>
-            <p className="text-gray-600 text-lg sm:text-xl leading-relaxed max-w-2xl">
-              Latest trends and content ideas for your niches
+            <p className="text-gray-600 text-lg">
+              Latest trends and ideas for your niches
             </p>
           </div>
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col items-end gap-2">
             <Button
-              onClick={() => fetchTrends(true)}
-              disabled={isLoading}
-              size="xl"
+              onClick={handleRegenerate}
+              disabled={isRegenerating || isLoading}
+              size="lg"
               className="shadow-colored-lg whitespace-nowrap"
             >
-              {isLoading ? (
+              {isRegenerating ? (
                 <>
                   <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                  Refreshing...
+                  Regenerating…
                 </>
               ) : (
                 <>
                   <RefreshCw className="mr-2 h-5 w-5" />
-                  Refresh Trends
+                  Regenerate
                 </>
               )}
             </Button>
-            {usingCache && !isLoading && (
+            {ideasMeta.fromCache && !isLoading && !isRegenerating && (
               <Badge variant="secondary" className="text-xs">
                 <Clock className="w-3 h-3 mr-1" />
-                Loaded from cache (24h)
+                Loaded from cache
               </Badge>
             )}
           </div>
         </div>
 
-        <Tabs defaultValue="trends" className="space-y-8 animate-fade-up animation-delay-200">
+        {cycledMessage && (
+          <Card variant="glass" className="mb-6 border-l-4 border-l-contentual-pink animate-fade-up">
+            <CardContent className="p-4 flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-contentual-pink flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-gray-700">{cycledMessage}</p>
+            </CardContent>
+          </Card>
+        )}
+
+        <Tabs defaultValue="trends" className="space-y-6 animate-fade-up animation-delay-200">
           <TabsList className="grid w-full max-w-md grid-cols-2 mx-auto">
             <TabsTrigger value="trends">
               <TrendingUp className="w-4 h-4 mr-2" />
@@ -120,178 +238,67 @@ export default function TrendsPage() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="trends" className="space-y-6">
+          {/* ── Trends ── */}
+          <TabsContent value="trends" className="space-y-4">
             {isLoading ? (
-              <div className="flex flex-col items-center justify-center py-20">
-                <div className="loading-spinner mb-6"></div>
-                <p className="text-gray-600 font-medium text-lg">Discovering trending content...</p>
-              </div>
+              <p className="text-center text-gray-500 py-12">Loading…</p>
             ) : trends.length === 0 ? (
               <Card variant="glass" className="border-2 border-dashed border-gray-300">
-                <CardContent className="py-20 text-center">
-                  <div className="w-20 h-20 bg-gradient-to-br from-gray-100 to-gray-200 rounded-3xl mx-auto mb-6 flex items-center justify-center">
-                    <TrendingUp className="w-10 h-10 text-gray-400" />
-                  </div>
-                  <h3 className="text-2xl font-bold text-gray-800 mb-2">No Trends Yet</h3>
-                  <p className="text-gray-600 text-lg mb-6">Click the refresh button to discover trending content</p>
+                <CardContent className="py-16 text-center">
+                  <TrendingUp className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                  <h3 className="text-xl font-bold text-gray-800 mb-1">No Trends Yet</h3>
+                  <p className="text-gray-500 mb-6">
+                    Click Regenerate to fetch trending content for your niches.
+                  </p>
                 </CardContent>
               </Card>
             ) : (
-              <div className="space-y-6">
-                {trends.map((trend, idx) => (
-                  <Card
-                    key={trend.id}
-                    variant="elevated"
-                    className="group hover:-translate-y-1 transition-all duration-300 animate-fade-up"
-                    style={{ animationDelay: `${idx * 100}ms` }}
-                  >
-                    <CardContent className="p-8">
-                      <div className="flex flex-col sm:flex-row items-start gap-6">
-                        <div className="flex-shrink-0">
-                          <div className="w-20 h-20 bg-gradient-primary rounded-2xl flex items-center justify-center text-white shadow-colored-lg group-hover:scale-110 transition-transform duration-300">
-                            <div className="text-center">
-                              <TrendingUp className="w-8 h-8 mx-auto mb-1" />
-                              <div className="text-sm font-bold">{trend.trendingScore}</div>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex-1 w-full">
-                          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 mb-4">
-                            <div>
-                              <h3 className="text-2xl font-bold mb-3 text-gray-800 group-hover:text-contentual-pink transition-colors">
-                                {trend.title}
-                              </h3>
-                              <div className="flex flex-wrap items-center gap-2">
-                                <Badge size="lg" variant="gradient" className="shadow-sm">
-                                  {trend.niche.name}
-                                </Badge>
-                                {trend.platforms.map((platform) => (
-                                  <Badge key={platform} variant="secondary" size="lg">
-                                    {platform}
-                                  </Badge>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-
-                          <p className="text-gray-700 text-lg leading-relaxed mb-6">{trend.description}</p>
-
-                          {trend.hashtags.length > 0 && (
-                            <div className="flex items-start gap-3 p-4 bg-gradient-to-br from-contentual-pink-50 to-contentual-peach-50 rounded-xl border border-contentual-pink/10">
-                              <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center flex-shrink-0">
-                                <Hash className="w-4 h-4 text-white" />
-                              </div>
-                              <div className="flex flex-wrap gap-2">
-                                {trend.hashtags.map((tag) => (
-                                  <span key={tag} className="px-3 py-1 bg-white rounded-lg text-sm text-contentual-pink font-semibold shadow-xs border border-contentual-pink/10">
-                                    {tag}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
+              trends.map((trend, idx) => (
+                <TrendCard key={trend.id} trend={trend} idx={idx} />
+              ))
             )}
           </TabsContent>
 
-          <TabsContent value="ideas" className="space-y-6">
-            {isLoading ? (
-              <div className="flex flex-col items-center justify-center py-20">
-                <div className="loading-spinner mb-6"></div>
-                <p className="text-gray-600 font-medium text-lg">Generating content ideas...</p>
-              </div>
-            ) : contentIdeas.length === 0 ? (
-              <Card variant="glass" className="border-2 border-dashed border-gray-300">
-                <CardContent className="py-20 text-center">
-                  <div className="w-20 h-20 bg-gradient-to-br from-gray-100 to-gray-200 rounded-3xl mx-auto mb-6 flex items-center justify-center">
-                    <Zap className="w-10 h-10 text-gray-400" />
+          {/* ── Content Ideas ── */}
+          <TabsContent value="ideas" className="space-y-4">
+            {ideasMeta.stale && ideas.length > 0 && (
+              <Card variant="glass" className="border-l-4 border-l-amber-400">
+                <CardContent className="p-4 flex items-center justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                    <p className="text-sm text-gray-700">
+                      Trends have shifted since these ideas were generated. Refresh for fresh ideas.
+                    </p>
                   </div>
-                  <h3 className="text-2xl font-bold text-gray-800 mb-2">No Content Ideas Yet</h3>
-                  <p className="text-gray-600 text-lg mb-6">Click the refresh button to generate personalized content ideas</p>
+                  <Button size="sm" variant="secondary" onClick={handleRefreshIdeas} disabled={isRegenerating}>
+                    Refresh ideas
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
+
+            {isLoading ? (
+              <p className="text-center text-gray-500 py-12">Loading…</p>
+            ) : ideas.length === 0 ? (
+              <Card variant="glass" className="border-2 border-dashed border-gray-300">
+                <CardContent className="py-16 text-center">
+                  <Zap className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                  <h3 className="text-xl font-bold text-gray-800 mb-1">No Content Ideas Yet</h3>
+                  <p className="text-gray-500">
+                    Click Regenerate above to produce ideas based on your top trends.
+                  </p>
                 </CardContent>
               </Card>
             ) : (
-              <div className="grid md:grid-cols-2 gap-6">
-                {contentIdeas.map((idea, idx) => (
-                  <Card
+              <div className="grid md:grid-cols-2 gap-4">
+                {ideas.map((idea, idx) => (
+                  <IdeaCard
                     key={idea.id}
-                    variant="elevated"
-                    className="group hover:-translate-y-1 transition-all duration-300 animate-fade-up"
-                    style={{ animationDelay: `${idx * 100}ms` }}
-                  >
-                    <CardContent className="p-8 space-y-6">
-                      <div className="flex items-start justify-between gap-4">
-                        <h3 className="text-2xl font-bold text-gray-800 group-hover:text-contentual-pink transition-colors flex-1">
-                          {idea.title}
-                        </h3>
-                        <Badge
-                          size="lg"
-                          className={`capitalize whitespace-nowrap ${
-                            idea.difficulty === 'beginner'
-                              ? 'bg-gradient-to-br from-green-100 to-emerald-100 text-green-700 border border-green-200'
-                              : idea.difficulty === 'intermediate'
-                              ? 'bg-gradient-to-br from-yellow-100 to-amber-100 text-yellow-700 border border-yellow-200'
-                              : 'bg-gradient-to-br from-red-100 to-rose-100 text-red-700 border border-red-200'
-                          }`}
-                        >
-                          {idea.difficulty}
-                        </Badge>
-                      </div>
-
-                      <p className="text-gray-700 text-lg leading-relaxed">{idea.description}</p>
-
-                      <div className="flex flex-wrap items-center gap-4">
-                        <div className="flex items-center gap-2 px-4 py-2 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-100">
-                          <Clock className="w-5 h-5 text-blue-600" />
-                          <span className="font-semibold text-blue-700">{idea.timeEstimate} min</span>
-                        </div>
-                        <div className="flex items-center gap-2 px-4 py-2 bg-gradient-to-br from-contentual-peach-50 to-contentual-coral-50 rounded-xl border border-contentual-peach-100">
-                          <Zap className="w-5 h-5 text-contentual-peach" />
-                          <span className="font-semibold text-contentual-coral">{idea.niche.name}</span>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap gap-2">
-                        {idea.platforms.map((platform) => (
-                          <Badge key={platform} variant="secondary" size="lg">
-                            {platform}
-                          </Badge>
-                        ))}
-                      </div>
-
-                      {idea.steps.length > 0 && (
-                        <div className="p-6 bg-gradient-to-br from-gray-50 to-gray-100 rounded-2xl border border-gray-200">
-                          <p className="font-bold text-base text-gray-800 mb-4 flex items-center gap-2">
-                            <div className="w-6 h-6 bg-gradient-primary rounded-lg flex items-center justify-center">
-                              <span className="text-white text-xs font-bold">#</span>
-                            </div>
-                            Steps to Create:
-                          </p>
-                          <ol className="space-y-3">
-                            {idea.steps.slice(0, 3).map((step, stepIdx) => (
-                              <li key={stepIdx} className="text-gray-700 flex items-start gap-3 leading-relaxed">
-                                <span className="w-6 h-6 bg-contentual-pink/10 text-contentual-pink rounded-lg flex items-center justify-center flex-shrink-0 font-bold text-sm">
-                                  {stepIdx + 1}
-                                </span>
-                                <span>{step}</span>
-                              </li>
-                            ))}
-                            {idea.steps.length > 3 && (
-                              <li className="text-gray-500 italic text-sm ml-9">
-                                +{idea.steps.length - 3} more steps...
-                              </li>
-                            )}
-                          </ol>
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
+                    idea={idea}
+                    idx={idx}
+                    expanded={expandedIdeas.has(idea.id)}
+                    onToggle={() => toggleSteps(idea.id)}
+                  />
                 ))}
               </div>
             )}
@@ -299,5 +306,228 @@ export default function TrendsPage() {
         </Tabs>
       </main>
     </div>
+  );
+}
+
+// ─── trend card ──────────────────────────────────────────────────────────────
+
+function TrendCard({ trend, idx }: { trend: TrendItem; idx: number }) {
+  const primaryPlatform = trend.platforms[0];
+
+  return (
+    <Card
+      variant="elevated"
+      className="group hover:-translate-y-0.5 transition-transform duration-200 animate-fade-up"
+      style={{ animationDelay: `${Math.min(idx, 8) * 60}ms` }}
+    >
+      <CardContent className="p-6">
+        <div className="flex items-start gap-5">
+          <div className="flex-shrink-0">
+            <div className="w-16 h-16 bg-gradient-primary rounded-2xl flex items-center justify-center text-white shadow-colored">
+              <div className="text-center">
+                <TrendingUp className="w-5 h-5 mx-auto mb-0.5" />
+                <div className="text-xs font-bold">{trend.trendingScore}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+              <h3 className="text-xl font-bold text-gray-900 group-hover:text-contentual-pink transition-colors">
+                {trend.title}
+              </h3>
+              <div className="flex flex-wrap gap-1.5">
+                <Badge size="sm" variant="gradient">
+                  {trend.niche.name}
+                </Badge>
+                {trend.platforms.map((p) => (
+                  <Badge key={p} variant="secondary" size="sm">
+                    {p}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-gray-700 leading-relaxed mb-4">{trend.description}</p>
+
+            {trend.audioTrack && (
+              <p className="text-sm text-gray-500 mb-3">
+                🎵 <span className="font-medium">{trend.audioTrack}</span>
+              </p>
+            )}
+
+            {trend.hashtags.length > 0 && primaryPlatform && (
+              <div className="flex items-start gap-2 flex-wrap mb-3">
+                <Hash className="w-4 h-4 text-contentual-pink mt-1 flex-shrink-0" />
+                {trend.hashtags.map((tag) => (
+                  <a
+                    key={tag}
+                    href={hashtagUrl(primaryPlatform, tag)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-2.5 py-1 bg-white rounded-md text-xs text-contentual-pink font-semibold border border-contentual-pink/20 hover:border-contentual-pink hover:bg-contentual-pink-50 transition-colors"
+                    title={`Open ${tag} on ${primaryPlatform}`}
+                  >
+                    {tag.startsWith('#') ? tag : `#${tag}`}
+                  </a>
+                ))}
+              </div>
+            )}
+
+            {trend.exampleLinks.length > 0 && primaryPlatform && (
+              <div className="pt-3 border-t border-gray-100">
+                <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">
+                  Examples
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {trend.exampleLinks.map((link) => {
+                    const handle = link.replace(/^@/, '').trim();
+                    if (!handle) return null;
+                    return (
+                      <a
+                        key={link}
+                        href={getPlatformUrl(primaryPlatform, handle)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-sm text-gray-700 hover:text-contentual-pink underline-offset-2 hover:underline"
+                      >
+                        @{handle}
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ─── idea card ───────────────────────────────────────────────────────────────
+
+function IdeaCard({
+  idea,
+  idx,
+  expanded,
+  onToggle,
+}: {
+  idea: ContentIdea;
+  idx: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const visibleSteps = expanded ? idea.steps : idea.steps.slice(0, 3);
+  const hasMore = idea.steps.length > 3;
+
+  return (
+    <Card
+      variant="elevated"
+      className="group hover:-translate-y-0.5 transition-transform duration-200 animate-fade-up"
+      style={{ animationDelay: `${Math.min(idx, 8) * 60}ms` }}
+    >
+      <CardContent className="p-6 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <h3 className="text-xl font-bold text-gray-900 group-hover:text-contentual-pink transition-colors">
+            {idea.title}
+          </h3>
+          <Badge
+            size="sm"
+            className={`capitalize whitespace-nowrap ${
+              idea.difficulty === 'beginner'
+                ? 'bg-green-100 text-green-700 border-green-200'
+                : idea.difficulty === 'intermediate'
+                ? 'bg-yellow-100 text-yellow-700 border-yellow-200'
+                : 'bg-red-100 text-red-700 border-red-200'
+            }`}
+          >
+            {idea.difficulty}
+          </Badge>
+        </div>
+
+        <p className="text-gray-700 leading-relaxed">{idea.description}</p>
+
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <span className="inline-flex items-center gap-1.5 text-blue-700">
+            <Clock className="w-4 h-4" />
+            {idea.timeEstimate} min
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-contentual-coral">
+            <Zap className="w-4 h-4" />
+            {idea.niche.name}
+          </span>
+        </div>
+
+        {/* Platform pills as actionable buttons */}
+        {idea.platforms.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-gray-500 self-center">
+              See examples on
+            </span>
+            {idea.platforms.map((p) => (
+              <a
+                key={p}
+                href={searchUrl(p, idea.title)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white border border-gray-200 hover:border-contentual-pink hover:bg-contentual-pink-50 text-sm text-gray-700 hover:text-contentual-pink transition-colors capitalize"
+                title={`Search "${idea.title}" on ${p}`}
+              >
+                {p}
+                <ExternalLink className="w-3 h-3 opacity-60" />
+              </a>
+            ))}
+          </div>
+        )}
+
+        {idea.steps.length > 0 && (
+          <div className="p-4 bg-gray-50 rounded-xl border border-gray-100">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-3">
+              Steps to Create
+            </p>
+            <ol className="space-y-2">
+              {visibleSteps.map((step, i) => (
+                <li key={i} className="flex items-start gap-3 text-sm text-gray-800 leading-snug">
+                  <span className="w-5 h-5 bg-contentual-pink/10 text-contentual-pink rounded flex items-center justify-center flex-shrink-0 font-bold text-xs">
+                    {i + 1}
+                  </span>
+                  <span>{step}</span>
+                </li>
+              ))}
+            </ol>
+            {hasMore && (
+              <button
+                onClick={onToggle}
+                className="mt-3 inline-flex items-center gap-1 text-sm text-contentual-pink font-semibold hover:underline underline-offset-2"
+              >
+                {expanded ? (
+                  <>
+                    <ChevronUp className="w-4 h-4" />
+                    Show fewer
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="w-4 h-4" />
+                    Show all {idea.steps.length} steps
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        )}
+
+        {idea.equipment.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {idea.equipment.map((eq) => (
+              <Badge key={eq} variant="secondary" size="sm">
+                {eq}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

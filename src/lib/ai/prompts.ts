@@ -82,22 +82,34 @@ export const generateProfilePrompt = (
   survey: CreatorSurvey
 ): string => {
   const platformList = platforms.map((p) => `- ${p.platform}: @${p.username}`).join('\n');
+  const recentPosts =
+    (survey.recentPostTitles?.length ?? 0) > 0
+      ? survey.recentPostTitles.map((t) => `  - ${t}`).join('\n')
+      : '  (none provided)';
+  const audienceLine = survey.audience ? `\n- Audience: ${survey.audience}` : '';
 
-  return `Create a comprehensive content creator profile for:
+  return `Create a comprehensive content creator profile.
+
+CRITICAL RULE: Anchor niche matches in the creator's described CONTENT TOPICS and RECENT POSTS below. The username and the goals/equipment fields are weak signals — DO NOT over-weight them. If topics span multiple themes (for example parenting + dating + lifestyle), surface up to 5 distinct niches that together explain what the creator actually posts about. Each niche reasoning MUST quote or paraphrase specific evidence from the topics or recent posts.
+
+CONTENT SIGNAL (highest priority):
+- Topics: ${survey.contentTopics || '(none provided)'}
+- Recent posts:
+${recentPosts}${audienceLine}
 
 PLATFORMS:
 ${platformList}
 
-SURVEY:
+GOALS & CONSTRAINTS:
 - Goals: ${survey.goals}
 - Time: ${survey.timeCommitment} hours/week
 - Challenges: ${survey.challenges.join(', ')}
 - Formats: ${survey.preferredFormats.join(', ')}
 - Equipment: ${survey.equipment.join(', ')}
 
-IMPORTANT: Your entire response must be ONLY valid JSON. Do not include any text before or after the JSON object. Start your response with { and end with }.
+IMPORTANT: Your entire response must be ONLY valid JSON. Do not include any text before or after the JSON object. Start with { and end with }.
 
-Respond with this exact JSON structure:
+Respond with this exact JSON structure. topNiches MUST contain between 3 and 5 entries — prefer 5 when content spans multiple themes:
 {
   "baselineProfile": {
     "summary": "2-3 paragraph overview",
@@ -108,15 +120,16 @@ Respond with this exact JSON structure:
   "topNiches": [
     {
       "nicheId": 1,
-      "nicheName": "Name from list",
+      "nicheName": "Name from the niche list reference",
       "confidence": 95,
-      "reasoning": "Why this matches"
+      "reasoning": "Why this matches — cite evidence from topics/recent posts"
     }
   ],
   "similarCreators": [
     {
       "name": "Creator Name",
       "platform": "primary platform",
+      "handle": "@username",
       "followerCount": "100K-500K",
       "niche": "Their niche",
       "keySuccessFactors": ["..."],
@@ -145,7 +158,7 @@ Respond with this exact JSON structure:
   ]
 }
 
-CRITICAL: Return ONLY the JSON object above. No explanations, no markdown formatting, no code blocks. Just raw JSON starting with { and ending with }.`;
+CRITICAL: Return ONLY the JSON object above. Include 3-5 entries in topNiches. Every similarCreator MUST include a "handle" field starting with @. No explanations, no markdown formatting, no code blocks.`;
 };
 
 export const analyzeTrendsPrompt = (niches: string[], platforms: SocialPlatform[]): string => {
@@ -202,6 +215,43 @@ Respond in JSON format:
 }
 
 CRITICAL: Return ONLY the JSON object above. No explanations, no markdown formatting, no code blocks. Just raw JSON starting with { and ending with }.`;
+};
+
+export const generateCreatorsForNichePrompt = (
+  nicheName: string,
+  platforms: SocialPlatform[]
+): string => {
+  return `List well-known content creators for the "${nicheName}" niche on these platforms: ${platforms.join(', ')}.
+
+Provide BOTH:
+1. 4-6 top influencers (large, well-known accounts in this niche)
+2. 2-3 peer-level "similar creators" — smaller / mid-sized accounts the user could realistically learn from or compete with
+
+Respond with this exact JSON structure:
+{
+  "niche": "${nicheName}",
+  "influencers": [
+    {
+      "name": "Creator Name",
+      "platform": "instagram",
+      "handle": "@username",
+      "followersRange": "1M-5M",
+      "specialization": "What they're known for"
+    }
+  ],
+  "similarCreators": [
+    {
+      "name": "Creator Name",
+      "platform": "instagram",
+      "handle": "@username",
+      "followerCount": "100K-500K",
+      "keySuccessFactors": ["Factor 1", "Factor 2"],
+      "contentStyle": "Brief description"
+    }
+  ]
+}
+
+CRITICAL: Return ONLY the JSON. Every entry MUST include a real, plausible "handle" starting with @. No markdown, no explanations, no code blocks.`;
 };
 
 export const generateWeeklyPlanPrompt = (

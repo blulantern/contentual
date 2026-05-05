@@ -1,9 +1,10 @@
 import { AIService } from '../ai/ai-service';
-import { CreatorProfile, CreatorSurvey } from '@/types/profile';
+import { CreatorProfile, CreatorSurvey, NicheMatch } from '@/types/profile';
 import { PlatformConnection } from '@/types/platforms';
 import { generateProfilePrompt, SYSTEM_PROMPTS } from '../ai/prompts';
 import { getNicheById } from '../data/niche-categories';
 import { saveProfile } from '../storage/db';
+import { applyCompatibilityScores } from './niche-compatibility';
 
 export class ProfileService {
   constructor(private aiService: AIService) {}
@@ -37,10 +38,18 @@ export class ProfileService {
       throw new Error('AI returned invalid JSON format. Please try again.');
     }
 
-    const topNiches = parsed.topNiches.map((niche: any) => {
-      const fullNiche = getNicheById(niche.nicheId);
-      return fullNiche || { id: niche.nicheId, name: niche.nicheName };
-    }).slice(0, 3);
+    const aiNiches: NicheMatch[] = parsed.topNiches
+      .map((niche: any) => {
+        const fullNiche = getNicheById(niche.nicheId);
+        return {
+          ...(fullNiche || { id: niche.nicheId, name: niche.nicheName }),
+          // Confidence is recomputed below — AI value is ignored.
+          confidence: 0,
+          reasoning: niche.reasoning || '',
+        };
+      })
+      .slice(0, 5);
+    const topNiches = applyCompatibilityScores(aiNiches, survey);
 
     const profile: CreatorProfile = {
       id: crypto.randomUUID(),

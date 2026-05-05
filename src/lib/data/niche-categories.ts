@@ -177,6 +177,18 @@ export const NICHE_CATEGORIES: NicheCategory[] = [
   { id: 145, name: 'Classic Cars', category: 'Automotive' },
   { id: 146, name: 'Motorcycles', category: 'Automotive' },
   { id: 147, name: 'Electric Vehicles', category: 'Automotive' },
+
+  // Relationships & Dating
+  { id: 211, name: 'Dating Advice', category: 'Relationships' },
+  { id: 212, name: 'Relationships', category: 'Relationships' },
+  { id: 213, name: 'Single Life', category: 'Relationships' },
+  { id: 214, name: 'Marriage', category: 'Relationships' },
+  { id: 215, name: 'Long Distance', category: 'Relationships' },
+  { id: 216, name: 'Breakups & Healing', category: 'Relationships' },
+  { id: 217, name: 'Couples Vlogs', category: 'Relationships' },
+  { id: 218, name: 'Modern Romance', category: 'Relationships' },
+  { id: 219, name: 'Online Dating', category: 'Relationships' },
+  { id: 220, name: 'Relationship Memes', category: 'Relationships' },
 ];
 
 export const getNicheCategoriesText = (): string => {

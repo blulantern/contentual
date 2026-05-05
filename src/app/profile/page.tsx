@@ -1,16 +1,44 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Header from '@/components/layout/Header';
+import NichePicker from '@/components/niche-picker/NichePicker';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { useProfileStore } from '@/store/profile-store';
-import { Users, Target, TrendingUp } from 'lucide-react';
+import { useConfigStore } from '@/store/config-store';
+import { AIService } from '@/lib/ai/ai-service';
+import { CreatorsService } from '@/lib/services/creators-service';
+import { applyCompatibilityScores } from '@/lib/services/niche-compatibility';
+import { Users, Target, TrendingUp, ExternalLink, Pencil, Loader2 } from 'lucide-react';
+import { getPlatformUrl } from '@/lib/data/platforms';
+import type { Influencer, NicheMatch, SimilarCreator } from '@/types/profile';
+
+const PLATFORM_INITIAL: Record<string, string> = {
+  tiktok: 'T',
+  instagram: 'I',
+  youtube: 'Y',
+  twitter: 'X',
+};
+
+const truncate = (s: string, n: number): string =>
+  s.length > n ? `${s.slice(0, n).trimEnd()}…` : s;
 
 export default function ProfilePage() {
   const router = useRouter();
-  const { profile, loadProfile } = useProfileStore();
+  const {
+    profile,
+    loadProfile,
+    updateNiches,
+    setSimilarCreators,
+    upsertInfluencerGroup,
+    appendSimilarCreators,
+  } = useProfileStore();
+  const { config } = useConfigStore();
+  const [nichePickerOpen, setNichePickerOpen] = useState(false);
+  const [loadingNiches, setLoadingNiches] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     loadProfile();
@@ -24,181 +52,354 @@ export default function ProfilePage() {
   if (!profile) {
     return (
       <div className="min-h-screen bg-gradient-hero flex items-center justify-center">
-        <div className="text-center">
-          <div className="loading-spinner mx-auto mb-4"></div>
-          <p className="text-gray-600 font-medium">Loading your profile...</p>
-        </div>
+        <p className="text-gray-600 font-medium">Loading your profile…</p>
       </div>
     );
   }
+
+  // Match each top niche to influencers tagged for that niche
+  const influencersForNiche = (nicheName: string): Influencer[] => {
+    const group = profile.topInfluencers?.find(
+      (g) => g.niche.toLowerCase() === nicheName.toLowerCase()
+    );
+    return group?.influencers ?? [];
+  };
+
+  const handleNichesSave = async (selectedNiches: NicheMatch[]): Promise<void> => {
+    // 1. Recompute deterministic compatibility scores from the user's survey.
+    const scored = applyCompatibilityScores(selectedNiches, profile.survey);
+
+    // 2. Identify newly added niches (those without existing top-creator coverage).
+    const previousByLower = new Set(
+      profile.topNiches.map((n) => n.name.toLowerCase())
+    );
+    const newNicheNames = scored
+      .filter((n) => !previousByLower.has(n.name.toLowerCase()))
+      .map((n) => n.name);
+
+    // 3. Drop similar creators whose niche is no longer selected.
+    const selectedLower = new Set(scored.map((n) => n.name.toLowerCase()));
+    const filteredSimilar = (profile.similarCreators ?? []).filter((c) =>
+      selectedLower.has((c.niche || '').toLowerCase())
+    );
+
+    // 4. Persist the deterministic updates immediately.
+    await updateNiches(scored);
+    if (filteredSimilar.length !== (profile.similarCreators ?? []).length) {
+      await setSimilarCreators(filteredSimilar);
+    }
+
+    // 5. For any newly-added niche missing influencer coverage, fire-and-forget
+    //    a single AI fetch that returns BOTH top influencers and similar creators
+    //    for that niche.
+    const platforms = profile.platforms.map((p) => p.platform);
+    const aiService = new AIService(config);
+    const creatorsService = new CreatorsService(aiService);
+
+    const needsFetch = newNicheNames.filter(
+      (name) =>
+        !(profile.topInfluencers ?? []).some(
+          (g) => g.niche.toLowerCase() === name.toLowerCase()
+        )
+    );
+
+    if (needsFetch.length === 0) return;
+
+    setLoadingNiches((prev) => {
+      const next = new Set(prev);
+      needsFetch.forEach((n) => next.add(n));
+      return next;
+    });
+
+    for (const nicheName of needsFetch) {
+      creatorsService
+        .getCreatorsForNiche(nicheName, platforms)
+        .then(async (result) => {
+          if (result.influencers.length > 0) {
+            await upsertInfluencerGroup({
+              niche: result.niche,
+              influencers: result.influencers,
+            });
+          }
+          if (result.similarCreators.length > 0) {
+            await appendSimilarCreators(result.similarCreators);
+          }
+        })
+        .catch((err) => {
+          console.warn(`Failed to fetch creators for "${nicheName}":`, err);
+        })
+        .finally(() => {
+          setLoadingNiches((prev) => {
+            const next = new Set(prev);
+            next.delete(nicheName);
+            return next;
+          });
+        });
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-hero">
       <Header />
 
-      <main className="max-w-7xl mx-auto px-4 py-12 lg:py-20">
-        <div className="mb-12 animate-fade-up">
-          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold mb-4 tracking-tight">
+      <main className="max-w-7xl mx-auto px-4 py-12 lg:py-16">
+        <div className="mb-10 animate-fade-up">
+          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold mb-3 tracking-tight">
             Your Creator <span className="gradient-text">Profile</span>
           </h1>
-          <p className="text-gray-600 text-lg sm:text-xl leading-relaxed max-w-2xl">
-            AI-generated insights about your content strategy
-          </p>
+          <p className="text-gray-600 text-lg">{profile.platforms.length} platforms · {profile.topNiches.length} niches</p>
         </div>
 
-        {/* Baseline Profile */}
+        {/* Style / Strengths / Opportunities — fast bullet tidbits */}
         {profile.baselineProfile && (
-          <Card variant="elevated" className="mb-8 animate-fade-up animation-delay-200">
-            <CardHeader>
-              <CardTitle className="text-2xl sm:text-3xl">Profile Summary</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <p className="text-gray-700 text-lg leading-relaxed">{profile.baselineProfile.summary}</p>
-
-              <div className="p-6 bg-gradient-card rounded-2xl border border-contentual-pink/10">
-                <h3 className="font-bold text-xl mb-3 text-gray-800">Content Style</h3>
-                <p className="text-gray-700 leading-relaxed">{profile.baselineProfile.contentStyle}</p>
-              </div>
-
-              <div className="grid md:grid-cols-2 gap-6">
-                <div className="p-6 bg-gradient-to-br from-green-50 to-emerald-50 rounded-2xl border border-green-100">
-                  <h3 className="font-bold text-xl mb-4 text-gray-800 flex items-center gap-2">
-                    <div className="w-8 h-8 bg-gradient-to-br from-green-400 to-emerald-500 rounded-lg flex items-center justify-center">
-                      <span className="text-white text-lg">✓</span>
-                    </div>
-                    Strengths
-                  </h3>
-                  <ul className="space-y-3">
-                    {profile.baselineProfile.strengths.map((strength, idx) => (
-                      <li key={idx} className="text-gray-700 flex items-start gap-3 leading-relaxed">
-                        <span className="text-green-500 font-bold text-lg flex-shrink-0 mt-0.5">•</span>
-                        <span>{strength}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="p-6 bg-gradient-to-br from-purple-50 to-pink-50 rounded-2xl border border-purple-100">
-                  <h3 className="font-bold text-xl mb-4 text-gray-800 flex items-center gap-2">
-                    <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
-                      <span className="text-white text-lg">↗</span>
-                    </div>
-                    Opportunities
-                  </h3>
-                  <ul className="space-y-3">
-                    {profile.baselineProfile.opportunities.map((opp, idx) => (
-                      <li key={idx} className="text-gray-700 flex items-start gap-3 leading-relaxed">
-                        <span className="text-contentual-pink font-bold text-lg flex-shrink-0 mt-0.5">•</span>
-                        <span>{opp}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+          <div className="grid md:grid-cols-3 gap-4 mb-10 animate-fade-up animation-delay-200">
+            <Card variant="elevated">
+              <CardContent className="p-6">
+                <h3 className="text-sm font-bold uppercase tracking-wider text-contentual-pink mb-3">
+                  Content Style
+                </h3>
+                <p className="text-gray-800 text-sm leading-relaxed">
+                  {profile.baselineProfile.contentStyle}
+                </p>
+              </CardContent>
+            </Card>
+            <Card variant="elevated">
+              <CardContent className="p-6">
+                <h3 className="text-sm font-bold uppercase tracking-wider text-emerald-600 mb-3">
+                  Strengths
+                </h3>
+                <ul className="space-y-2 text-sm">
+                  {profile.baselineProfile.strengths.slice(0, 5).map((s, i) => (
+                    <li key={i} className="flex gap-2 text-gray-800 leading-snug">
+                      <span className="text-emerald-500 font-bold flex-shrink-0">+</span>
+                      <span>{s}</span>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+            <Card variant="elevated">
+              <CardContent className="p-6">
+                <h3 className="text-sm font-bold uppercase tracking-wider text-contentual-coral mb-3">
+                  Opportunities
+                </h3>
+                <ul className="space-y-2 text-sm">
+                  {profile.baselineProfile.opportunities.slice(0, 5).map((o, i) => (
+                    <li key={i} className="flex gap-2 text-gray-800 leading-snug">
+                      <span className="text-contentual-coral font-bold flex-shrink-0">↗</span>
+                      <span>{o}</span>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          </div>
         )}
 
-        {/* Top Niches */}
+        {/* Top Niches with % bars + top creators in niche */}
         <Card variant="elevated" className="mb-8 animate-fade-up animation-delay-400">
           <CardHeader>
-            <CardTitle className="flex items-center gap-3 text-2xl sm:text-3xl">
-              <div className="w-12 h-12 bg-gradient-primary rounded-2xl flex items-center justify-center shadow-colored">
-                <Target className="w-6 h-6 text-white" />
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-3 text-2xl">
+                  <div className="w-10 h-10 bg-gradient-primary rounded-2xl flex items-center justify-center shadow-colored">
+                    <Target className="w-5 h-5 text-white" />
+                  </div>
+                  Top Niches
+                </CardTitle>
+                <CardDescription className="mt-1">
+                  Your strongest content categories with similar creators
+                </CardDescription>
               </div>
-              Top Niches
-            </CardTitle>
-            <CardDescription className="text-base">Your most relevant content categories</CardDescription>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setNichePickerOpen(true)}
+              >
+                <Pencil className="w-4 h-4 mr-1.5" />
+                Edit niches
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {profile.topNiches.map((niche, idx) => (
-                <div
-                  key={idx}
-                  className="group p-6 bg-gradient-to-br from-white to-contentual-pink-50 rounded-2xl border-2 border-contentual-pink/10 hover:border-contentual-pink/30 transition-all duration-300 hover:shadow-soft-lg hover:-translate-y-0.5"
-                >
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-bold text-xl text-gray-800">{niche.name}</h3>
-                    <Badge size="lg" variant="gradient" className="shadow-sm">
-                      {niche.confidence}% match
-                    </Badge>
+            <div className="space-y-5">
+              {profile.topNiches.map((niche, idx) => {
+                const matched = influencersForNiche(niche.name).slice(0, 4);
+                const isLoading = loadingNiches.has(niche.name);
+                return (
+                  <div
+                    key={idx}
+                    className="p-5 bg-white rounded-2xl border-2 border-contentual-pink/10 hover:border-contentual-pink/30 transition-colors"
+                  >
+                    <div className="flex items-baseline justify-between gap-3 mb-2">
+                      <h3 className="font-bold text-lg text-gray-900">{niche.name}</h3>
+                      <Badge size="lg" variant="gradient" className="whitespace-nowrap">
+                        {niche.confidence}% match
+                      </Badge>
+                    </div>
+                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden mb-3">
+                      <div
+                        className="h-full bg-gradient-primary transition-all"
+                        style={{ width: `${Math.max(0, Math.min(100, niche.confidence))}%` }}
+                      />
+                    </div>
+                    {niche.reasoning && (
+                      <p className="text-sm text-gray-600 leading-snug mb-3">
+                        {truncate(niche.reasoning, 180)}
+                      </p>
+                    )}
+                    {isLoading ? (
+                      <div className="pt-3 border-t border-gray-100 flex items-center gap-2 text-sm text-gray-500">
+                        <Loader2 className="w-4 h-4 animate-spin text-contentual-pink" />
+                        Finding top creators in this niche…
+                      </div>
+                    ) : matched.length > 0 ? (
+                      <div className="pt-3 border-t border-gray-100">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">
+                          Top creators in this niche
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {matched.map((inf, i) => {
+                            const handle = (inf.handle || '').replace(/^@/, '');
+                            const url = handle ? getPlatformUrl(inf.platform, handle) : null;
+                            const initial = PLATFORM_INITIAL[inf.platform] || '?';
+                            return url ? (
+                              <a
+                                key={i}
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-2 px-3 py-1.5 bg-gradient-to-br from-contentual-pink-50 to-contentual-peach-50 rounded-lg border border-contentual-pink/10 hover:border-contentual-pink/40 hover:shadow-sm transition-all text-sm group"
+                                title={`${inf.specialization || ''} · ${inf.followersRange}`}
+                              >
+                                <span className="w-5 h-5 bg-gradient-primary text-white text-[10px] font-bold rounded flex items-center justify-center">
+                                  {initial}
+                                </span>
+                                <span className="font-medium text-gray-800">{inf.name}</span>
+                                <ExternalLink className="w-3 h-3 text-gray-400 group-hover:text-contentual-pink" />
+                              </a>
+                            ) : (
+                              <span
+                                key={i}
+                                className="inline-flex items-center gap-2 px-3 py-1.5 bg-gray-50 rounded-lg border border-gray-200 text-sm text-gray-700"
+                              >
+                                <span className="w-5 h-5 bg-gray-300 text-white text-[10px] font-bold rounded flex items-center justify-center">
+                                  {initial}
+                                </span>
+                                {inf.name}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
-                  <p className="text-gray-700 leading-relaxed">{niche.reasoning}</p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </CardContent>
         </Card>
 
-        {/* Similar Creators */}
+        {/* Similar Creators — compact, linked */}
         {profile.similarCreators && profile.similarCreators.length > 0 && (
           <Card variant="elevated" className="mb-8 animate-fade-up animation-delay-600">
             <CardHeader>
-              <CardTitle className="flex items-center gap-3 text-2xl sm:text-3xl">
-                <div className="w-12 h-12 bg-gradient-secondary rounded-2xl flex items-center justify-center shadow-colored">
-                  <Users className="w-6 h-6 text-white" />
+              <CardTitle className="flex items-center gap-3 text-2xl">
+                <div className="w-10 h-10 bg-gradient-secondary rounded-2xl flex items-center justify-center shadow-colored">
+                  <Users className="w-5 h-5 text-white" />
                 </div>
                 Similar Creators
               </CardTitle>
-              <CardDescription className="text-base">Creators with similar content strategies</CardDescription>
+              <CardDescription>Creators with overlapping content strategy</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid md:grid-cols-2 gap-6">
-                {profile.similarCreators.map((creator, idx) => (
-                  <div
-                    key={idx}
-                    className="group p-6 bg-white rounded-2xl border-2 border-gray-100 hover:border-contentual-coral/30 transition-all duration-300 hover:shadow-soft-lg hover:-translate-y-0.5"
-                  >
-                    <div className="flex items-center justify-between mb-3">
-                      <h3 className="font-bold text-lg text-gray-800">{creator.name}</h3>
-                      <Badge variant="secondary" size="lg">{creator.platform}</Badge>
-                    </div>
-                    <p className="text-sm font-medium text-contentual-coral mb-2">{creator.followerCount} followers</p>
-                    <p className="text-sm text-gray-700 mb-4 leading-relaxed">{creator.contentStyle}</p>
-                    <div className="flex flex-wrap gap-2">
-                      {creator.keySuccessFactors.map((factor, i) => (
-                        <Badge key={i} variant="accent" size="sm" className="shadow-xs">
-                          {factor}
+              <div className="grid md:grid-cols-2 gap-4">
+                {profile.similarCreators.map((creator: SimilarCreator, idx) => {
+                  const handle = (creator.handle || '').replace(/^@/, '');
+                  const url = handle ? getPlatformUrl(creator.platform, handle) : null;
+                  const NameTag: any = url ? 'a' : 'span';
+                  const nameProps: any = url
+                    ? { href: url, target: '_blank', rel: 'noopener noreferrer' }
+                    : {};
+                  return (
+                    <div
+                      key={idx}
+                      className="p-5 bg-white rounded-2xl border-2 border-gray-100 hover:border-contentual-coral/30 transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <NameTag
+                          {...nameProps}
+                          className={`font-bold text-base text-gray-900 ${
+                            url
+                              ? 'hover:text-contentual-pink underline-offset-2 hover:underline inline-flex items-center gap-1'
+                              : ''
+                          }`}
+                        >
+                          {creator.name}
+                          {url && <ExternalLink className="w-3 h-3 inline" />}
+                        </NameTag>
+                        <Badge variant="secondary" size="sm">
+                          {creator.platform}
                         </Badge>
-                      ))}
+                      </div>
+                      <p className="text-xs text-gray-500 mb-2">
+                        {creator.followerCount} · {creator.niche}
+                      </p>
+                      <p className="text-sm text-gray-700 mb-3 leading-snug">
+                        {creator.contentStyle}
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {creator.keySuccessFactors.slice(0, 3).map((factor, i) => (
+                          <Badge key={i} variant="accent" size="sm">
+                            {factor}
+                          </Badge>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </CardContent>
           </Card>
         )}
 
-        {/* Engagement Strategies */}
+        <NichePicker
+          open={nichePickerOpen}
+          currentNiches={profile.topNiches}
+          onClose={() => setNichePickerOpen(false)}
+          onSave={handleNichesSave}
+        />
+
+        {/* Engagement Strategies — compact */}
         {profile.engagementStrategies && profile.engagementStrategies.length > 0 && (
           <Card variant="elevated" className="animate-fade-up animation-delay-[800ms]">
             <CardHeader>
-              <CardTitle className="flex items-center gap-3 text-2xl sm:text-3xl">
-                <div className="w-12 h-12 bg-gradient-to-br from-contentual-peach to-contentual-coral rounded-2xl flex items-center justify-center shadow-colored">
-                  <TrendingUp className="w-6 h-6 text-white" />
+              <CardTitle className="flex items-center gap-3 text-2xl">
+                <div className="w-10 h-10 bg-gradient-to-br from-contentual-peach to-contentual-coral rounded-2xl flex items-center justify-center shadow-colored">
+                  <TrendingUp className="w-5 h-5 text-white" />
                 </div>
                 Engagement Strategies
               </CardTitle>
-              <CardDescription className="text-base">Platform-specific recommendations</CardDescription>
+              <CardDescription>Platform-specific tactics</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid md:grid-cols-2 gap-6">
+              <div className="grid md:grid-cols-2 gap-4">
                 {profile.engagementStrategies.map((strategy, idx) => (
                   <div
                     key={idx}
-                    className="p-6 bg-gradient-to-br from-orange-50 to-peach-50 rounded-2xl border-2 border-orange-100"
+                    className="p-4 bg-gradient-to-br from-orange-50 to-peach-50 rounded-2xl border border-orange-100"
                   >
-                    <h3 className="font-bold text-xl mb-4 capitalize text-gray-800 flex items-center gap-2">
-                      <div className="w-8 h-8 bg-gradient-to-br from-orange-400 to-contentual-peach rounded-lg flex items-center justify-center">
-                        <span className="text-white text-xs font-bold">{strategy.platform.charAt(0).toUpperCase()}</span>
-                      </div>
+                    <h3 className="font-bold capitalize text-gray-900 mb-2 flex items-center gap-2">
+                      <span className="w-6 h-6 bg-gradient-to-br from-orange-400 to-contentual-peach rounded-md flex items-center justify-center text-white text-[10px] font-bold">
+                        {strategy.platform.charAt(0).toUpperCase()}
+                      </span>
                       {strategy.platform}
                     </h3>
-                    <ul className="space-y-3">
-                      {strategy.strategies.map((strat, i) => (
-                        <li key={i} className="text-gray-700 flex items-start gap-3 leading-relaxed">
-                          <span className="text-contentual-peach font-bold text-lg flex-shrink-0 mt-0.5">•</span>
-                          <span>{strat}</span>
+                    <ul className="space-y-1.5 text-sm">
+                      {strategy.strategies.slice(0, 3).map((s, i) => (
+                        <li key={i} className="flex gap-2 text-gray-700 leading-snug">
+                          <span className="text-contentual-peach font-bold flex-shrink-0">·</span>
+                          <span>{s}</span>
                         </li>
                       ))}
                     </ul>
