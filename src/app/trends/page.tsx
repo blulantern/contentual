@@ -44,8 +44,12 @@ const formatDuration = (ms: number): string => {
 };
 
 export default function TrendsPage() {
-  const { profile } = useProfileStore();
+  const { profile, loadProfile } = useProfileStore();
   const { config } = useConfigStore();
+
+  useEffect(() => {
+    loadProfile();
+  }, [loadProfile]);
 
   const [trends, setTrends] = useState<TrendItem[]>([]);
   const [ideas, setIdeas] = useState<ContentIdea[]>([]);
@@ -57,6 +61,7 @@ export default function TrendsPage() {
   const [expandedIdeas, setExpandedIdeas] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [isRegenerating, setIsRegenerating] = useState(false);
+  const [isWarming, setIsWarming] = useState(false);
 
   const niches = useMemo(() => profile?.topNiches.map((n) => n.name) ?? [], [profile]);
   const platforms: SocialPlatform[] = useMemo(
@@ -71,22 +76,28 @@ export default function TrendsPage() {
     [niches]
   );
 
-  // Fast first paint: read view + ideas from cache, never auto-fetch.
+  // Phase 1 — fast first paint from local cache + Supabase (per-niche).
+  // Phase 2 — background warm via the services' own 24h/3h gates: never-
+  // fetched niches get an initial pull; ideas regenerate when their cache
+  // row is missing or > 3h old. The gates make the warm a no-op when not
+  // needed, so this is safe to run on every mount.
   useEffect(() => {
     if (!profile) return;
     let cancelled = false;
     (async () => {
+      const aiService = new AIService(config);
+      const trendsService = new TrendDictionaryService(aiService);
+      const ideaService = new IdeaService(aiService);
+
+      // ── Phase 1 ─────────────────────────────────────────────────────────
       setIsLoading(true);
+      let phase1Trends: TrendItem[] = [];
       try {
-        const aiService = new AIService(config);
-        const trendsService = new TrendDictionaryService(aiService);
-        const ideaService = new IdeaService(aiService);
-
-        const cachedTrends = await trendsService.getView(nicheIds);
+        phase1Trends = await trendsService.getView(nicheIds);
         if (cancelled) return;
-        setTrends(cachedTrends);
+        setTrends(phase1Trends);
 
-        const trendTitles = cachedTrends.slice(0, 5).map((t) => t.title);
+        const trendTitles = phase1Trends.slice(0, 5).map((t) => t.title);
         const ideaResult: IdeaResult = await ideaService.getIdeas(
           niches,
           platforms,
@@ -103,6 +114,43 @@ export default function TrendsPage() {
         console.error('Failed to load cached trends/ideas:', err);
       } finally {
         if (!cancelled) setIsLoading(false);
+      }
+
+      // ── Phase 2 ─────────────────────────────────────────────────────────
+      if (cancelled || nicheIds.length === 0) return;
+      setIsWarming(true);
+      try {
+        // Trends: 24h gate per niche (never-fetched niches have lastFetchedAt=0
+        // and trigger an initial pull).
+        await trendsService.refreshIfStale(niches, platforms);
+        if (cancelled) return;
+        const refreshedTrends = await trendsService.getView(nicheIds);
+        if (cancelled) return;
+        if (refreshedTrends.length > 0) setTrends(refreshedTrends);
+
+        // Ideas: 3h gate inside getIdeas('regenerate') skips the API call
+        // when a row exists and is < 3h old. New niche set ⇒ no row ⇒ generate.
+        const titles = (refreshedTrends.length > 0 ? refreshedTrends : phase1Trends)
+          .slice(0, 5)
+          .map((t) => t.title);
+        const warmedIdeas = await ideaService.getIdeas(
+          niches,
+          platforms,
+          titles,
+          'regenerate'
+        );
+        if (cancelled) return;
+        if (warmedIdeas.ideas.length > 0) {
+          setIdeas(warmedIdeas.ideas);
+          setIdeasMeta({
+            fromCache: warmedIdeas.fromCache,
+            stale: warmedIdeas.staleVsCurrentTrends,
+          });
+        }
+      } catch (err) {
+        console.warn('[trends] background warm failed:', err);
+      } finally {
+        if (!cancelled) setIsWarming(false);
       }
     })();
     return () => {
@@ -197,7 +245,7 @@ export default function TrendsPage() {
           <div className="flex flex-col items-end gap-2">
             <Button
               onClick={handleRegenerate}
-              disabled={isRegenerating || isLoading}
+              disabled={isRegenerating || isLoading || isWarming}
               size="lg"
               className="shadow-colored-lg whitespace-nowrap"
             >
@@ -213,7 +261,13 @@ export default function TrendsPage() {
                 </>
               )}
             </Button>
-            {ideasMeta.fromCache && !isLoading && !isRegenerating && (
+            {isWarming && !isRegenerating && (
+              <Badge variant="secondary" className="text-xs">
+                <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                Refreshing in background
+              </Badge>
+            )}
+            {!isWarming && ideasMeta.fromCache && !isLoading && !isRegenerating && (
               <Badge variant="secondary" className="text-xs">
                 <Clock className="w-3 h-3 mr-1" />
                 Loaded from cache
@@ -250,11 +304,23 @@ export default function TrendsPage() {
             ) : trends.length === 0 ? (
               <Card variant="glass" className="border-2 border-dashed border-gray-300">
                 <CardContent className="py-16 text-center">
-                  <TrendingUp className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                  <h3 className="text-xl font-bold text-gray-800 mb-1">No Trends Yet</h3>
-                  <p className="text-gray-500 mb-6">
-                    Click Regenerate to fetch trending content for your niches.
-                  </p>
+                  {isWarming ? (
+                    <>
+                      <Loader2 className="w-12 h-12 text-contentual-pink mx-auto mb-4 animate-spin" />
+                      <h3 className="text-xl font-bold text-gray-800 mb-1">
+                        Generating trends for your niches…
+                      </h3>
+                      <p className="text-gray-500">This usually takes 10-20 seconds.</p>
+                    </>
+                  ) : (
+                    <>
+                      <TrendingUp className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                      <h3 className="text-xl font-bold text-gray-800 mb-1">No Trends Yet</h3>
+                      <p className="text-gray-500 mb-6">
+                        Click Regenerate to fetch trending content for your niches.
+                      </p>
+                    </>
+                  )}
                 </CardContent>
               </Card>
             ) : (
@@ -287,11 +353,23 @@ export default function TrendsPage() {
             ) : ideas.length === 0 ? (
               <Card variant="glass" className="border-2 border-dashed border-gray-300">
                 <CardContent className="py-16 text-center">
-                  <Zap className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                  <h3 className="text-xl font-bold text-gray-800 mb-1">No Content Ideas Yet</h3>
-                  <p className="text-gray-500">
-                    Click Regenerate above to produce ideas based on your top trends.
-                  </p>
+                  {isWarming ? (
+                    <>
+                      <Loader2 className="w-12 h-12 text-contentual-pink mx-auto mb-4 animate-spin" />
+                      <h3 className="text-xl font-bold text-gray-800 mb-1">
+                        Generating ideas for your niches…
+                      </h3>
+                      <p className="text-gray-500">This usually takes 10-20 seconds.</p>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                      <h3 className="text-xl font-bold text-gray-800 mb-1">No Content Ideas Yet</h3>
+                      <p className="text-gray-500">
+                        Click Regenerate above to produce ideas based on your top trends.
+                      </p>
+                    </>
+                  )}
                 </CardContent>
               </Card>
             ) : (

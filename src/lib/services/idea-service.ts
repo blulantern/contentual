@@ -2,10 +2,15 @@ import { AIService } from '../ai/ai-service';
 import { ContentIdea, ContentIdeasCacheRow } from '@/types/trends';
 import { SocialPlatform } from '@/types/platforms';
 import { generateContentIdeasPrompt, SYSTEM_PROMPTS } from '../ai/prompts';
-import { getContentIdeasCache, putContentIdeasCache } from '../storage/db';
+import {
+  getContentIdeasCache,
+  getAllContentIdeasCaches,
+  putContentIdeasCache,
+} from '../storage/db';
 import { NICHE_CATEGORIES, getNicheByName } from '../data/niche-categories';
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
 const TOP_TREND_TITLE_COUNT = 5;
 const STALE_DIVERGENCE_THRESHOLD = 2;
 
@@ -67,6 +72,33 @@ export class IdeaService {
           ideas: cached.ideas,
           fromCache: true,
           staleVsCurrentTrends: stale,
+        };
+      }
+
+      // Fallback: exact key didn't hit (user added/removed a niche since
+      // last generation). Scan all non-expired rows and surface ideas
+      // whose niche.id is in the user's current set, newest first,
+      // deduped by title.
+      const overlapping = await ideasFromOverlappingCaches(nicheIds);
+      if (overlapping.length > 0) {
+        return {
+          ideas: overlapping,
+          fromCache: true,
+          staleVsCurrentTrends: false,
+        };
+      }
+    } else {
+      // intent === 'regenerate': honor a 3h rate-limit so the regenerate
+      // button (and background warm) doesn't burn tokens on rapid clicks
+      // or repeat mounts. Mirrors the trends-side 3h fresh-fetch gate.
+      const cached = await getContentIdeasCache(key);
+      if (cached && Date.now() - cached.generatedAt.getTime() < THREE_HOURS_MS) {
+        return {
+          ideas: cached.ideas,
+          fromCache: true,
+          staleVsCurrentTrends:
+            trendTitlesDivergence(cached.trendTitlesUsed, trimmedTitles) >
+            STALE_DIVERGENCE_THRESHOLD,
         };
       }
     }
@@ -141,3 +173,26 @@ export const ideasCacheKeyFor = async (
   nicheIds: number[],
   platforms: SocialPlatform[]
 ): Promise<string> => cacheKeyFor(nicheIds, platforms);
+
+const ideasFromOverlappingCaches = async (
+  currentNicheIds: number[]
+): Promise<ContentIdea[]> => {
+  if (currentNicheIds.length === 0) return [];
+  const wanted = new Set(currentNicheIds);
+  const rows = await getAllContentIdeasCaches();
+  rows.sort((a, b) => b.generatedAt.getTime() - a.generatedAt.getTime());
+
+  const seen = new Set<string>();
+  const out: ContentIdea[] = [];
+  for (const row of rows) {
+    for (const idea of row.ideas) {
+      if (typeof idea.niche?.id !== 'number') continue;
+      if (!wanted.has(idea.niche.id)) continue;
+      const titleKey = idea.title.trim().toLowerCase();
+      if (seen.has(titleKey)) continue;
+      seen.add(titleKey);
+      out.push(idea);
+    }
+  }
+  return out;
+};

@@ -35,6 +35,11 @@ export default function DashboardPage() {
     );
   }
 
+  const firstUsername = profile.platforms
+    .find((p) => p.username.trim().length > 0)
+    ?.username.trim()
+    .replace(/^@/, '');
+
   const quickStats = [
     {
       label: 'Top Niches',
@@ -95,7 +100,7 @@ export default function DashboardPage() {
         {/* Welcome Section */}
         <div className="mb-10">
           <h1 className="text-3xl sm:text-4xl lg:text-5xl font-display font-bold mb-3 animate-fade-up">
-            Welcome back, <span className="gradient-text">Creator</span>
+            Welcome back, <span className="gradient-text">{firstUsername ? `@${firstUsername}` : 'Creator'}</span>
           </h1>
           <p className="text-gray-600 text-base sm:text-lg animate-fade-up animation-delay-200">
             Here&apos;s your content strategy overview

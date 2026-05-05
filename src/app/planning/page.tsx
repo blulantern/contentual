@@ -17,7 +17,7 @@ import { format } from 'date-fns';
 import { PLATFORM_METADATA } from '@/lib/data/platforms';
 
 export default function PlanningPage() {
-  const { profile } = useProfileStore();
+  const { profile, loadProfile } = useProfileStore();
   const { config } = useConfigStore();
   const [plan, setPlan] = useState<WeeklyPlan | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -67,8 +67,9 @@ export default function PlanningPage() {
   };
 
   useEffect(() => {
+    loadProfile();
     loadPlan();
-  }, []);
+  }, [loadProfile]);
 
   return (
     <div className="min-h-screen bg-gradient-hero">

@@ -420,6 +420,33 @@ export const putContentIdeasCache = async (
   await tryCache((c) => c.contentIdeasCache.put(row));
 };
 
+/**
+ * Read all non-expired content-ideas cache rows. Used by the per-niche
+ * fallback in IdeaService.getIdeas — when an exact-key lookup misses
+ * (e.g. user has dropped/added a niche since the row was written), we
+ * scan rows and surface ideas whose `niche.id` is in the current set.
+ */
+export const getAllContentIdeasCaches = async (): Promise<ContentIdeasCacheRow[]> => {
+  const cached = await tryCache(async (c) => {
+    const now = new Date();
+    return c.contentIdeasCache.filter((r) => r.expiresAt > now).toArray();
+  });
+  if (cached && cached.length > 0) return cached;
+
+  const nowIso = new Date().toISOString();
+  const { data, error } = await sb()
+    .from('content_ideas_cache')
+    .select('*')
+    .gt('expires_at', nowIso);
+  if (error) throw error;
+  const rows = (data ?? []).map(ideasRowToItem);
+
+  await tryCache(async (c) => {
+    if (rows.length > 0) await c.contentIdeasCache.bulkPut(rows);
+  });
+  return rows;
+};
+
 export const clearExpiredContentIdeasCaches = async (): Promise<void> => {
   const nowIso = new Date().toISOString();
   const { error } = await sb()
